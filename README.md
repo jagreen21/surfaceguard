@@ -23,7 +23,13 @@ decisions that shape everything else:
   shows "Protecting" without a self-check having just passed. Silent failure is
   the only bug that fully breaks the promise in the first line.
 
-## Install
+## Putting it on someone else's Mac
+
+See **[docs/INSTALL.md](docs/INSTALL.md)** for the full runbook: what to
+build, how to get it past Gatekeeper, the Local Network permission macOS
+requires before the camera can be found, and what she needs to hand.
+
+## Install (for development)
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e ".[detect,dev]"
