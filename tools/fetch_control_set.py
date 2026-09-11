@@ -25,6 +25,11 @@ import sys
 import zipfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "packaging"))
+from _env import require_venv  # noqa: E402
+
+require_venv('certifi')
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from surfaceguard.net import get as http_get  # noqa: E402

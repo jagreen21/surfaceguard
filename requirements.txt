@@ -1,0 +1,17 @@
+# Everything the app itself needs. Install into a virtualenv:
+#
+#     python3 -m venv .venv
+#     .venv/bin/pip install -r requirements.txt
+#
+# There is no bare `python` on macOS, and the system `python3` has none of these,
+# so every command in the docs runs `.venv/bin/python` explicitly.
+
+numpy>=2.0
+opencv-python>=4.10
+PySide6-Essentials>=6.8      # the GUI; the full PySide6 adds ~300 MB we never use
+av>=14                       # in-process H.264 decoding, so no ffmpeg binary ships
+onnxruntime>=1.20            # the detector, on CoreML
+cryptography>=42             # Ed25519 signature checks on updates
+certifi>=2024.1              # the framework build of Python ignores the system roots
+websockets>=13               # the Eufy bridge protocol
+sounddevice>=0.4             # deterrent playback

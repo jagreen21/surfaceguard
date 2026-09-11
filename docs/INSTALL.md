@@ -17,7 +17,7 @@ You will need the bridge running against her Eufy account. The easiest way is to
 finish setup once on **your** Mac (section 2), then:
 
 ```bash
-python tools/phase0.py --source eufy --url ws://127.0.0.1:3050
+.venv/bin/python tools/phase0.py --source eufy --url ws://127.0.0.1:3050
 ```
 
 It writes `phase0-out/phase0-report.md` with a **GO / NO-GO** verdict covering
@@ -48,19 +48,32 @@ Updates come from this private repo, so her Mac needs a read-only token.
    but a rotation you have to remember is still a rotation.
 5. Copy it. You will paste it once, on her Mac.
 
-### 1.2 Fetch what gets bundled
+### 1.2 Set up the project environment
+
+Once per machine. macOS has no bare `python`, and its `python3` has none of the
+dependencies, so everything here runs the project's own interpreter — either
+through `make`, or as `.venv/bin/python` explicitly.
+
+```bash
+make setup      # creates .venv and installs everything
+make doctor     # checks this machine has what it needs, and says what is missing
+```
+
+If anything below ever fails confusingly, run `make doctor` first.
+
+### 1.3 Fetch what gets bundled
 
 Once per machine:
 
 ```bash
-python packaging/fetch_runtime.py     # Node + the Eufy bridge, checksum-verified
-python packaging/export_model.py      # yolov8m detector (~99 MB)
+make runtime    # Node + the Eufy bridge, checksum-verified
+make model      # the yolov8m detector (~99 MB)
 ```
 
-### 1.3 Build and publish
+### 1.4 Build and publish
 
 ```bash
-python packaging/make_release.py --version 1.0.0 --with-onnx
+make release VERSION=1.0.0
 ```
 
 That builds the `.app`, signs it, zips it, checks the signature survives the round
@@ -72,7 +85,7 @@ release.
 > and the only fix is reinstalling by hand.
 > `python packaging/make_release.py --show-key` prints the public half.
 
-### 1.4 Sanity-check the build
+### 1.5 Sanity-check the build
 
 ```bash
 "dist/Surface Guard.app/Contents/MacOS/Surface Guard" --demo --selftest /tmp/check.png
@@ -172,8 +185,8 @@ noticed.
 ## 5. Shipping her an update later
 
 ```bash
-python packaging/make_release.py --version 1.0.1 --with-onnx        # the whole app
-python packaging/make_release.py --version 1.1.0 --model models/yolov8m.onnx
+.venv/bin/python packaging/make_release.py --version 1.0.1 --with-onnx        # the whole app
+.venv/bin/python packaging/make_release.py --version 1.1.0 --model models/yolov8m.onnx
 ```
 
 The second ships **only the detector** — 99 MB instead of 245 MB, and it installs

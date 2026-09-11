@@ -82,7 +82,7 @@ install, no terminal, and no `ffmpeg` on the target machine.
 ### One-time setup on the build machine
 
 ```bash
-python packaging/fetch_runtime.py
+.venv/bin/python packaging/fetch_runtime.py
 ```
 
 Downloads the self-contained Node runtime from nodejs.org (verified against
@@ -92,7 +92,7 @@ Node's published SHA-256 sums) and `npm install`s the Eufy bridge into
 ### Build and publish
 
 ```bash
-python packaging/make_release.py --version 0.2.0 --with-onnx
+.venv/bin/python packaging/make_release.py --version 0.2.0 --with-onnx
 ```
 
 Builds the `.app`, signs it, zips it with `ditto`, verifies the signature

@@ -1,0 +1,5 @@
+# Build and test only. Never shipped inside the app.
+-r requirements.txt
+
+pytest>=8
+pyinstaller>=6.10

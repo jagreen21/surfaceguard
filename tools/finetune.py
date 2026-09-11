@@ -20,6 +20,11 @@ import argparse
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "packaging"))
+from _env import require_venv  # noqa: E402
+
+require_venv('numpy', 'cv2')
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from surfaceguard.detection.cat_detector import bundled_model_path  # noqa: E402

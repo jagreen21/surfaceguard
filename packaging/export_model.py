@@ -22,6 +22,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _env import require_venv  # noqa: E402
+
+require_venv()
+
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
 ASSETS = ROOT / "tests" / "assets"
