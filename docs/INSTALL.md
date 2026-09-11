@@ -74,12 +74,15 @@ leaves your Keychain — repository privacy never protected that.
 
 ## 3. On her Mac, once
 
-She opens the image and double-clicks **Install Surface Guard**.
+She opens the image and **right-clicks Install Surface Guard → Open**, then
+**Open** again in the box that appears. Not a double-click: macOS will refuse that
+one and offer only Cancel, because the app is signed but not notarised. Right-click
+→ Open is what produces the button.
 
-macOS will refuse the first time — it cannot check an app that did not come from
-the App Store. She right-clicks **Install Surface Guard**, chooses **Open**, then
-**Open** again. Once, on a short shell script she can read, rather than on a 500 MB
-application.
+The installer is a signed app bundle for exactly this reason. A loose `.command`
+script cannot be code-signed at all, and macOS rejects an unsigned script delivered
+by AirDrop outright — `no usable signature`, with no way past it. Its executable is
+still a plain shell script you can read.
 
 The installer then does the rest by itself:
 
