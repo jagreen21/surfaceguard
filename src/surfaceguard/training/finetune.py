@@ -1,9 +1,14 @@
 """The fine-tuning recipe — problems 2 and 3.
 
-**Privacy (problem 2).** Training runs where the pictures already are. Nothing
-leaves the machine: the dataset is written to a local directory, the training kit
-is fetched on demand into a temporary environment, and it is deleted afterwards.
-Her kitchen never lands on someone else's disk.
+**Privacy (problem 2).** Training runs where the pictures already are: the dataset
+is written to a local directory, the kit is fetched into a temporary environment,
+and that is deleted afterwards. Her kitchen never lands on someone else's disk.
+
+That is not automatic. Ultralytics ships with ``sync`` enabled, which posts
+anonymous usage analytics on every run, so the kit explicitly turns it off before
+training and this module refuses to train if the setting did not take. Base
+weights are still *downloaded* — that is inbound, and necessary — but nothing
+about her house goes the other way.
 
 **Forgetting (problem 3).** Training a detector on one kitchen is the textbook way
 to make it forget what a cat looks like anywhere else. Four defences, all cheap:
@@ -81,6 +86,12 @@ def finetune(
         python = build_kit(work, progress)
         script = f'''
 import json, torch
+from ultralytics.utils import SETTINGS
+# Off before anything else runs. Ultralytics posts anonymous analytics by
+# default, and "training happens on your own Mac" has to mean it.
+SETTINGS.update({{"sync": False}})
+if SETTINGS.get("sync"):
+    raise SystemExit("TELEMETRY_STILL_ON")
 from ultralytics import YOLO
 # MPS where available: an M-series Mac trains this in minutes, and it means the
 # pictures never have to leave the machine.
@@ -104,6 +115,13 @@ print("RESULT " + json.dumps({{"onnx": str(onnx), "metrics": metrics,
         run = subprocess.run([str(python), "-c", script], cwd=work,
                              capture_output=True, text=True)
         tail = (run.stdout + run.stderr)[-2000:]
+        if "TELEMETRY_STILL_ON" in tail:
+            return TrainingResult(
+                False,
+                message="Refusing to train: the training kit would have sent usage "
+                        "analytics, and this is supposed to stay on your Mac.",
+                log_tail=tail,
+            )
         if run.returncode != 0:
             return TrainingResult(False, message="Training failed.", log_tail=tail)
 

@@ -176,3 +176,92 @@ def test_f1_arithmetic():
     assert s.recall == pytest.approx(0.8)
     assert s.f1 == pytest.approx(0.8)
     assert evaluate.Score().f1 == 0.0
+
+
+# ------------------------------------------------- the four gaps, closed
+
+
+def test_general_images_go_into_train_only(tmp_path):
+    """Mixing them into validation would hide the regression val exists to catch."""
+    import json
+
+    import cv2
+
+    frame = tmp_path / "f.jpg"
+    cv2.imwrite(str(frame), np.full((240, 320, 3), 120, np.uint8))
+    hers = [dataset.Example(frame, [(CAT, 10.0, 10.0, 60.0, 80.0)], event_id=i)
+            for i in range(20)]
+    general = [dataset.Example(frame, [(CAT, 20.0, 20.0, 90.0, 110.0)], event_id=-i)
+               for i in range(1, 60)]
+    dataset.write(hers, tmp_path / "ds", mix=general, mix_ratio=0.3)
+    manifest = json.loads((tmp_path / "ds" / "manifest.json").read_text())
+    assert manifest["general_images_mixed_in"] > 0
+    # Val is drawn from her events only; the mix is appended to train afterwards.
+    assert manifest["val"] == len({e.event_id for e in hers}) // 5
+
+
+def test_general_mix_is_capped(tmp_path):
+    """A mix that swamps her data trains a general model, not hers."""
+    import json
+
+    import cv2
+
+    frame = tmp_path / "f.jpg"
+    cv2.imwrite(str(frame), np.full((240, 320, 3), 120, np.uint8))
+    hers = [dataset.Example(frame, [(CAT, 1.0, 1.0, 9.0, 9.0)], event_id=i) for i in range(10)]
+    general = [dataset.Example(frame, [(CAT, 1.0, 1.0, 9.0, 9.0)], event_id=-i)
+               for i in range(1, 500)]
+    dataset.write(hers, tmp_path / "ds", mix=general, mix_ratio=5.0)   # absurd request
+    manifest = json.loads((tmp_path / "ds" / "manifest.json").read_text())
+    her_train = manifest["train"] - manifest["general_images_mixed_in"]
+    assert manifest["general_images_mixed_in"] <= her_train * dataset.MAX_MIX_RATIO + 1
+
+
+def test_the_training_script_disables_telemetry_before_importing_yolo():
+    """Ultralytics posts analytics by default; 'it stays on your Mac' has to mean it."""
+    from surfaceguard.training import finetune
+
+    source = finetune.finetune.__doc__ or ""
+    import inspect
+
+    body = inspect.getsource(finetune.finetune)
+    assert '"sync": False' in body
+    assert body.index('SETTINGS.update') < body.index("from ultralytics import YOLO")
+    assert "TELEMETRY_STILL_ON" in body, "no check that the setting actually took"
+
+
+def test_training_refuses_when_telemetry_could_not_be_turned_off(monkeypatch, tmp_path):
+    import subprocess
+
+    from surfaceguard.training import finetune
+
+    monkeypatch.setattr(finetune, "build_kit", lambda work, progress=None: tmp_path / "py")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, "TELEMETRY_STILL_ON", ""),
+    )
+    result = finetune.finetune(tmp_path / "data.yaml", out_dir=tmp_path)
+    assert not result.ok
+    assert "analytics" in result.message
+
+
+def test_control_set_parsing_drops_crowds_and_other_species():
+    """A crowd box around six cats teaches the wrong shape and unfairly fails a candidate."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("fcs", "tools/fetch_control_set.py")
+    fcs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fcs)
+
+    annotations = {
+        "images": [{"id": 1, "file_name": "a.jpg", "width": 640, "height": 480},
+                   {"id": 2, "file_name": "b.jpg", "width": 100, "height": 100}],
+        "annotations": [
+            {"image_id": 1, "category_id": 17, "bbox": [100, 100, 200, 150], "iscrowd": 0},
+            {"image_id": 1, "category_id": 18, "bbox": [0, 0, 50, 50], "iscrowd": 0},
+            {"image_id": 2, "category_id": 17, "bbox": [0, 0, 100, 100], "iscrowd": 1},
+        ],
+    }
+    kept = fcs.cat_images(annotations)
+    assert [img["file_name"] for img, _ in kept] == ["a.jpg"]
+    assert len(kept[0][1]) == 1, "the dog was kept as a cat"

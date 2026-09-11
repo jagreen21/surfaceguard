@@ -2,7 +2,7 @@
 """Fine-tune the detector on this machine's own reviewed history.
 
     python tools/finetune.py --status                 # is there enough data yet?
-    python tools/finetune.py --propose                # suggest boxes for missed cats
+    python tools/finetune.py --review                 # confirm boxes for missed cats
     python tools/finetune.py --train --control DIR    # build, train, and gate
 
 Nothing leaves this machine. The pictures stay where they are, training runs
@@ -54,19 +54,24 @@ def load_control(directory: Path) -> list:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--status", action="store_true")
-    ap.add_argument("--propose", action="store_true")
+    ap.add_argument("--propose", action="store_true", help="list proposals without a UI")
+    ap.add_argument("--review", action="store_true",
+                    help="confirm proposed boxes in a window, the only way 'missed' "
+                         "events become training data")
     ap.add_argument("--train", action="store_true")
     ap.add_argument("--control", type=Path, help="directory of general cat images")
     ap.add_argument("--out", type=Path, default=Path("training-out"))
     ap.add_argument("--epochs", type=int, default=finetune.EPOCHS)
-    ap.add_argument("--yes", action="store_true", help="accept all box proposals (testing only)")
+    ap.add_argument("--yes", action="store_true",
+                    help="accept every proposal unseen — testing only; a confirmed "
+                         "box nobody looked at is not supervision")
     args = ap.parse_args()
 
     log = ActivityLog()
     events = log.recent(limit=100_000)
     proposals_map = {}
 
-    if args.propose or args.train:
+    if args.propose or args.review or args.train:
         model = bundled_model_path()
         if model is None:
             raise SystemExit("No detection model installed.")
@@ -75,8 +80,16 @@ def main() -> int:
         if args.yes:
             for p in found.proposals:
                 p.confirmed = True
+        elif args.review or args.train:
+            if found.proposals:
+                from surfaceguard.ui.proposals import review_proposals
+
+                confirmed = review_proposals(found.proposals)
+                print(f"  {confirmed} of {len(found.proposals)} proposals confirmed")
+            else:
+                print("  nothing to confirm")
         proposals_map = found.confirmed_map()
-        if args.propose and not args.train:
+        if (args.propose or args.review) and not args.train:
             for p in found.proposals[:20]:
                 print(f"    event {p.event_id}: {p.cls} {tuple(round(v) for v in p.box)} "
                       f"score {p.score:.2f} -> {p.image.name}")

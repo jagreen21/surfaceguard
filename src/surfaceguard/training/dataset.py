@@ -173,19 +173,43 @@ def split(examples: list[Example], val_fraction: float = 0.2, seed: int = 11):
     return train, val
 
 
+# General images are capped at this fraction of her own training images. Enough to
+# anchor the model to cats in general, not so much that it drowns out the point of
+# training at all.
+MAX_MIX_RATIO = 0.4
+
+
 def write(
     examples: list[Example],
     out_dir: Path,
     val_fraction: float = 0.2,
-    image_size: tuple[int, int] | None = None,
+    mix: list[Example] | None = None,
+    mix_ratio: float = 0.3,
+    seed: int = 11,
 ) -> Path:
-    """Write an Ultralytics-format dataset. Returns the data.yaml path."""
+    """Write an Ultralytics-format dataset. Returns the data.yaml path.
+
+    ``mix`` is general cat imagery folded into the *training* split only. It is
+    the third defence against forgetting: the model keeps seeing cats that are not
+    hers while it learns the ones that are. It is deliberately kept out of the
+    validation split, because validation exists to measure how well the model does
+    on *her* cats, and diluting it would hide exactly the regression that matters.
+    """
     import cv2
 
     out_dir = Path(out_dir)
     if out_dir.exists():
         shutil.rmtree(out_dir)
-    train, val = split(examples, val_fraction)
+    train, val = split(examples, val_fraction, seed)
+
+    mixed_in = 0
+    if mix:
+        cap = int(len(train) * min(mix_ratio, MAX_MIX_RATIO))
+        chosen = list(mix)
+        random.Random(seed).shuffle(chosen)
+        chosen = chosen[:cap]
+        train = train + chosen
+        mixed_in = len(chosen)
 
     for name, subset in (("train", train), ("val", val)):
         (out_dir / "images" / name).mkdir(parents=True, exist_ok=True)
@@ -217,6 +241,7 @@ def write(
     )
     (out_dir / "manifest.json").write_text(json.dumps({
         "train": len(train), "val": len(val),
+        "general_images_mixed_in": mixed_in,
         "classes": list(CLASSES),
         "proposed_boxes": sum(1 for e in examples if e.proposed),
     }, indent=2))
