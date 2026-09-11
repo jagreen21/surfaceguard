@@ -1,10 +1,14 @@
-"""The GitHub side of updates, including whether the token still works.
+"""The GitHub side of updates.
 
-Updates come from a private repository, so her Mac holds a fine-grained read-only
-token. A token that silently expires would stop updates without any visible
-symptom — the exact kind of quiet failure this app exists to avoid — so its health
-is checked daily, and GitHub's own expiry header is used to warn *before* it
-lapses rather than after.
+The release repository is public, so no credential is needed and none is stored: a
+token that silently expires would stop updates with no visible symptom, and the
+signature — not the repository's privacy — is what actually stops a bad update
+installing. Whoever controls the host still cannot make this app run code they
+wrote.
+
+A token is still honoured if one is present, for a private fork or to lift the
+unauthenticated rate limit. When there is one, its health is checked daily and
+GitHub's own expiry header warns before it lapses rather than after.
 """
 
 from __future__ import annotations
@@ -48,18 +52,20 @@ class TokenHealth:
             return self.reason
         days = self.days_left
         if days is None:
-            return "Update access is working"
+            return "Updates are working"
         if days < 0:
             return "The update access token has expired"
         return f"Update access is working ({days:.0f} days until the token expires)"
 
 
-def _headers(token: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {token}",
+def _headers(token: str | None) -> dict[str, str]:
+    headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def _parse_expiry(headers: dict[str, str]) -> datetime | None:
@@ -79,14 +85,24 @@ def check_token(repo: str, token: str | None = None) -> TokenHealth:
     """Confirm the token can still read the release repository, and for how long."""
     token = token or get_update_token()
     now = time.time()
-    if not token:
-        return TokenHealth(
-            False, now,
-            "Automatic updates are not set up",
-            "Add an update access token in Settings so this app can update itself.",
-        )
 
     status, body, headers = request(f"{API}/repos/{repo}", _headers(token), timeout=20.0)
+    if not token:
+        # No credential is expected: the release repository is public.
+        if status == 200:
+            return TokenHealth(True, now, "", "")
+        if status in (401, 403, 404):
+            return TokenHealth(
+                False, now,
+                "Updates cannot reach the release page",
+                f"{repo} is not publicly readable. Add an access token in Settings, "
+                "or make the repository public.",
+            )
+        return TokenHealth(
+            False, now,
+            f"GitHub returned an error while checking for updates ({status})",
+            "This is usually temporary. It will try again later.",
+        )
     expires = _parse_expiry(headers)
 
     if status == 200:
@@ -115,10 +131,8 @@ def check_token(repo: str, token: str | None = None) -> TokenHealth:
 
 
 def latest_release(repo: str, token: str | None = None) -> dict:
-    token = token or get_update_token()
-    if not token:
-        raise RuntimeError("No update access token is configured")
-    status, body, _ = request(f"{API}/repos/{repo}/releases/latest", _headers(token), timeout=30.0)
+    status, body, _ = request(f"{API}/repos/{repo}/releases/latest",
+                              _headers(token or get_update_token()), timeout=30.0)
     if status == 404:
         return {}          # nothing published yet is not an error
     if status != 200:
@@ -127,11 +141,8 @@ def latest_release(repo: str, token: str | None = None) -> dict:
 
 
 def download_asset(repo: str, asset_id: int, token: str | None = None) -> bytes:
-    """Private-repo assets must be fetched through the API, not the browser URL."""
-    token = token or get_update_token()
-    if not token:
-        raise RuntimeError("No update access token is configured")
-    headers = {**_headers(token), "Accept": "application/octet-stream"}
+    """Assets are fetched through the API, which works with or without a token."""
+    headers = {**_headers(token or get_update_token()), "Accept": "application/octet-stream"}
     status, body, _ = request(
         f"{API}/repos/{repo}/releases/assets/{asset_id}", headers, timeout=600.0
     )

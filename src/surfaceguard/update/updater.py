@@ -5,8 +5,16 @@ Nothing is installed that was not signed by the build machine's Ed25519 key
 patched in place, so the replacement keeps the signature it was built with and
 macOS will still launch it.
 
-An update is never installed silently while the app is armed — a restart mid-cat
-is worse than a day-old version. The app asks, or waits for a pause.
+Updates install themselves. The alternative — a button in Settings — meant that in
+practice she would stay on whatever version was handed to her, because nobody opens
+Settings to look for work. The cost is a restart of a few seconds at an arbitrary
+moment, during which nothing is watched; that is a real cost, and it is smaller
+than running a version with a known fault in it for months.
+
+Three things keep that from becoming its own fault: a candidate that fails
+verification is never installed, a version that fails to start twice is rolled
+back, and every install is logged and announced afterwards so a restart is never
+unexplained.
 """
 
 from __future__ import annotations
@@ -23,12 +31,19 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from ..logging_setup import get as get_logger
 from ..storage.preferences import support_dir
 from . import access, build_info
 from .manifest import MODEL, Release, is_newer, verify
 
+logger = get_logger("update")
+
 MANIFEST_ASSET = "release.json"
 CHECK_EVERY_S = 6 * 3600
+
+# A build that cannot start is worse than an old one. If the version we installed
+# is still not running after this many attempts, put the previous bundle back.
+MAX_START_ATTEMPTS = 2
 
 
 class UpdateState(Enum):
@@ -61,13 +76,41 @@ def cache_dir() -> Path:
     return d
 
 
+def pending_note_path() -> Path:
+    return support_dir() / "updated-to.txt"
+
+
+def note_update(version: str) -> None:
+    """Leave a note the next start can turn into 'updated to X'."""
+    try:
+        pending_note_path().write_text(version)
+    except OSError:
+        pass
+
+
+def take_update_note() -> str:
+    """Read and clear the note, so a restart is never unexplained."""
+    path = pending_note_path()
+    try:
+        version = path.read_text().strip()
+        path.unlink(missing_ok=True)
+        return version
+    except OSError:
+        return ""
+
+
 def cleanup_previous() -> None:
-    """Remove the bundle left behind by a previous update. Safe to call at startup."""
+    """Remove the bundle left behind by a previous update. Safe to call at startup.
+
+    Reaching this point means the new version started, so the old one is no longer
+    needed as a way back.
+    """
     current = build_info.bundle_path()
     if current is None:
         return
     old = current.parent / (current.name + ".old")
     if old.exists():
+        logger.info("previous version cleaned up after a successful start")
         shutil.rmtree(old, ignore_errors=True)
 
 
@@ -84,6 +127,12 @@ class Updater:
         self.public_key = public_key if public_key is not None else build_info.UPDATE_PUBLIC_KEY
         self.current_version = current_version or build_info.VERSION
         self.status = UpdateStatus()
+        # Installing without being asked is the whole point; a caller can turn it
+        # off, but nothing in the app does.
+        self.auto_install = True
+        # Called with the new version just before the process is replaced, so the
+        # app can stop cleanly and leave a note to show after the restart.
+        self.on_before_install = None
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -112,9 +161,34 @@ class Updater:
             try:
                 self.refresh_token_health()
                 self.check()
+                if self.auto_install and self.status.state is UpdateState.AVAILABLE:
+                    self._auto()
             except Exception as exc:
+                logger.exception("update cycle failed: %s", exc)
                 self._fail(f"Could not check for updates: {exc}")
             self._stop.wait(CHECK_EVERY_S)
+
+    def _auto(self) -> None:
+        """Download, verify and install without anyone being asked."""
+        release = self.status.release
+        version = release.version if release else "?"
+        ok, why = self.can_install()
+        if not ok:
+            logger.warning("update %s is ready but cannot be installed: %s", version, why)
+            return
+        logger.info("installing update %s automatically", version)
+        if self.download().state is not UpdateState.READY:
+            logger.error("update %s did not download: %s", version, self.status.message)
+            return
+        if self.on_before_install is not None:
+            try:
+                self.on_before_install(version)
+            except Exception:
+                logger.exception("pre-install hook failed; installing anyway")
+        error = self.install_and_relaunch()
+        if error:
+            logger.error("update %s could not be installed: %s", version, error)
+            self._fail(error)
 
     def refresh_token_health(self, force: bool = False) -> access.TokenHealth:
         """Daily: is the update token still valid, and how long until it expires?
@@ -302,10 +376,15 @@ class Updater:
             os.rename(backup, current)          # put it back; a failed update must not brick it
             return f"Could not put the new version in place: {exc}"
 
+        # The note survives the restart; cleanup_previous() on the next start is
+        # what confirms the new version actually ran.
+        note_update(self.status.release.version if self.status.release else "")
+
         # Launch the new copy before this process exits. The old bundle is left as
         # .old and cleaned up by the next start, because deleting a bundle that is
         # still executing can crash it mid-teardown.
         subprocess.Popen(["/usr/bin/open", "-n", str(current)])
+        logger.info("relaunching into %s", current)
         return ""
 
     # ---------------------------------------------------------------- helpers

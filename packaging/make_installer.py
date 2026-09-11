@@ -4,9 +4,11 @@
     .venv/bin/python packaging/make_installer.py
     .venv/bin/python packaging/make_installer.py --token github_pat_...
 
-Everything in section 2 of docs/INSTALL.md that a script *can* do, this does:
-copies the app to ~/Applications, clears the quarantine flag AirDrop sets, turns on
-start-at-login, optionally stores the update token, and opens the app.
+Everything in the runbook that a script *can* do, this does: copies the app to
+~/Applications, clears the quarantine flag AirDrop sets, turns on start-at-login,
+and opens the app. No update token is needed — the release repository is public,
+and it is the signature on each build, not the repository's privacy, that stops
+anything else installing.
 
 Two steps stay manual because macOS will not let them be otherwise, and pretending
 they are automated is how someone ends up staring at an app that silently never
@@ -172,8 +174,8 @@ def main() -> int:
     ap.add_argument("--app", type=Path, default=DIST / f"{APP_NAME}.app")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--token", default="",
-                    help="GitHub update token to store on her Mac. The installer then "
-                         "contains a credential — delete it after use.")
+                    help="optional: only needed if the release repo is private. The "
+                         "installer then contains a credential — delete it after use.")
     args = ap.parse_args()
 
     if not args.app.exists():

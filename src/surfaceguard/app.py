@@ -73,7 +73,7 @@ from .ui.settings import SettingsScreen
 from .ui.shell import AppShell
 from .ui.surface_editor import SurfaceEditor
 from .update import build_info
-from .update.updater import Updater, cleanup_previous
+from .update.updater import Updater, cleanup_previous, take_update_note
 
 logger = get_logger("app")
 
@@ -257,6 +257,9 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
         self.activity.refresh()
         self.settings.set_launch_at_login(prefs.launch_at_login)
         self._refresh_settings()
+        # Updates install themselves, so the engine must be stopped cleanly first
+        # rather than being killed mid-frame by the relaunch.
+        self.updater.on_before_install = self._prepare_for_update
         self.updater.start()
 
     # -------------------------------------------------------------------- tray
@@ -393,6 +396,15 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
             )
             return self.run_setup()
         return True
+
+    def _prepare_for_update(self, version: str) -> None:
+        """Called just before this process is replaced by a newer one."""
+        logger.info("stopping for update to %s", version)
+        self._hold_awake(False)
+        try:
+            self.engine.stop()
+        except Exception:
+            logger.exception("engine did not stop cleanly before the update")
 
     def _refresh_settings(self) -> None:
         username = str((self.prefs.camera or {}).get("username", ""))
@@ -1239,6 +1251,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Remove the bundle a previous update left behind, before anything else runs.
     cleanup_previous()
+    updated_to = take_update_note()
+    if updated_to:
+        # A restart she did not ask for should never be unexplained.
+        logger.info("restarted after updating to %s", updated_to)
 
     source, supervisor = _make_source(prefs)
     if source is None:

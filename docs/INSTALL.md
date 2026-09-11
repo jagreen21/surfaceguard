@@ -10,18 +10,7 @@ her Mac, once.
 
 ## 1. On your Mac
 
-### 1.1 Make the update token
-
-Updates come from this private repo, so her Mac needs a read-only token.
-
-1. github.com → Settings → Developer settings → **Fine-grained tokens** → Generate new
-2. Repository access: **Only select repositories** → `jagreen21/surfaceguard`
-3. Permissions → Repository permissions → **Contents: Read-only**
-4. Expiry: as long as GitHub allows. The app checks daily and warns 14 days out,
-   but a rotation you have to remember is still a rotation.
-5. Copy it. You will paste it once, on her Mac.
-
-### 1.2 Set up the project environment
+### 1.1 Set up the project environment
 
 Once per machine. macOS has no bare `python`, and its `python3` has none of the
 dependencies, so everything here runs the project's own interpreter — either
@@ -34,7 +23,7 @@ make doctor     # checks this machine has what it needs, and says what is missin
 
 If anything below ever fails confusingly, run `make doctor` first.
 
-### 1.3 Fetch what gets bundled
+### 1.2 Fetch what gets bundled
 
 Once per machine:
 
@@ -43,7 +32,7 @@ make runtime    # Node + the Eufy bridge, checksum-verified
 make model      # the yolov8m detector (~99 MB)
 ```
 
-### 1.4 Build and publish
+### 1.3 Build and publish
 
 ```bash
 make release VERSION=1.0.0
@@ -58,7 +47,7 @@ release.
 > and the only fix is reinstalling by hand.
 > `python packaging/make_release.py --show-key` prints the public half.
 
-### 1.5 Sanity-check the build
+### 1.4 Sanity-check the build
 
 ```bash
 "dist/Surface Guard.app/Contents/MacOS/Surface Guard" --demo --selftest /tmp/check.png
@@ -72,15 +61,16 @@ identical to a healthy app from the outside.
 ## 2. Make the thing you AirDrop
 
 ```bash
-make installer                      # or: make installer TOKEN=github_pat_...
+make installer
 ```
 
 That produces `dist/SurfaceGuard-<version>-Installer.dmg` — the app, a one-click
 installer, and a short read-me. **AirDrop that one file.**
 
-Passing `TOKEN=` stores the update token on her Mac during install, so updates work
-without anyone touching Settings. The image then contains a credential: delete it
-once she has it, and do not leave it in Downloads.
+No access token is involved. The release repository is public, so her Mac needs no
+credential, and there is nothing to expire or rotate. What stops anything else
+installing is the Ed25519 signature on each build, made with a key that never
+leaves your Keychain — repository privacy never protected that.
 
 ## 3. On her Mac, once
 

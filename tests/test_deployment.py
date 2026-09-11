@@ -504,3 +504,100 @@ def test_build_and_detector_agree_on_model_preference():
     source = inspect.getsource(build_app._preferred_model)
     for name in MODEL_FILENAMES:
         assert name in source, f"build_app does not know about {name}"
+
+
+# ------------------------------------------------------- installing unasked
+
+
+def test_the_background_loop_installs_without_being_asked(tmp_path, monkeypatch, keypair):
+    """The whole reason for auto-install: a button in Settings meant staying on
+    whatever version was handed over, because nobody opens Settings looking for work."""
+    import surfaceguard.update.updater as mod
+
+    key, pub = keypair
+    release = make_release(version="9.9.9")
+    manifest = release.to_json(key.sign(release.signing_payload()).hex()).encode()
+    monkeypatch.setattr(mod.access, "latest_release", lambda repo, token=None: {
+        "assets": [{"name": "release.json", "id": 1}]})
+    monkeypatch.setattr(mod.access, "download_asset", lambda repo, aid, token=None: manifest)
+
+    updater = Updater(repo="x/y", public_key=pub, current_version="1.0.0")
+    calls = {}
+    monkeypatch.setattr(updater, "can_install", lambda: (True, ""))
+    monkeypatch.setattr(updater, "download",
+                        lambda: (calls.__setitem__("downloaded", True),
+                                 updater._set(UpdateState.READY, "ready"))[1])
+    monkeypatch.setattr(updater, "install_and_relaunch",
+                        lambda: calls.__setitem__("installed", True) or "")
+
+    updater.check()
+    assert updater.status.state is UpdateState.AVAILABLE
+    updater._auto()
+    assert calls.get("downloaded") and calls.get("installed")
+
+
+def test_auto_install_stops_if_the_bundle_cannot_be_replaced(monkeypatch, keypair):
+    """Running from a place it cannot write must not become a restart loop."""
+    import surfaceguard.update.updater as mod
+
+    key, pub = keypair
+    release = make_release(version="9.9.9")
+    manifest = release.to_json(key.sign(release.signing_payload()).hex()).encode()
+    monkeypatch.setattr(mod.access, "latest_release", lambda repo, token=None: {
+        "assets": [{"name": "release.json", "id": 1}]})
+    monkeypatch.setattr(mod.access, "download_asset", lambda repo, aid, token=None: manifest)
+
+    updater = Updater(repo="x/y", public_key=pub, current_version="1.0.0")
+    touched = {}
+    monkeypatch.setattr(updater, "can_install", lambda: (False, "read-only location"))
+    monkeypatch.setattr(updater, "download", lambda: touched.setdefault("no", True))
+    updater.check()
+    updater._auto()
+    assert not touched, "it downloaded an update it could not install"
+
+
+def test_auto_install_refuses_an_unverified_release(monkeypatch, keypair):
+    """Installing unasked raises the stakes on verification, not lowers them."""
+    import surfaceguard.update.updater as mod
+
+    _key, pub = keypair
+    attacker = Ed25519PrivateKey.generate()
+    release = make_release(version="9.9.9")
+    manifest = release.to_json(attacker.sign(release.signing_payload()).hex()).encode()
+    monkeypatch.setattr(mod.access, "latest_release", lambda repo, token=None: {
+        "assets": [{"name": "release.json", "id": 1}]})
+    monkeypatch.setattr(mod.access, "download_asset", lambda repo, aid, token=None: manifest)
+
+    updater = Updater(repo="x/y", public_key=pub, current_version="1.0.0")
+    installed = {}
+    monkeypatch.setattr(updater, "install_and_relaunch",
+                        lambda: installed.setdefault("yes", True) or "")
+    updater.check()
+    updater._auto()
+    assert updater.status.state is UpdateState.FAILED
+    assert not installed
+
+
+def test_a_restart_after_updating_is_explainable(tmp_path, monkeypatch):
+    """An app that restarts itself and says nothing is indistinguishable from a crash."""
+    import surfaceguard.update.updater as mod
+
+    monkeypatch.setattr(mod, "pending_note_path", lambda: tmp_path / "updated-to.txt")
+    assert mod.take_update_note() == ""
+    mod.note_update("1.2.3")
+    assert mod.take_update_note() == "1.2.3"
+    assert mod.take_update_note() == "", "the note must be consumed, not repeated"
+
+
+def test_updates_work_with_no_credential_at_all(monkeypatch):
+    """The release repository is public; a token is optional, not required."""
+    from surfaceguard.update import access
+
+    seen = {}
+    monkeypatch.setattr(access, "get_update_token", lambda: None)
+    monkeypatch.setattr(access, "request",
+                        lambda url, headers, timeout=60.0: (
+                            seen.update(headers=headers) or (200, b"{}", {})))
+    health = access.check_token("owner/public-repo")
+    assert health.ok, health.reason
+    assert "Authorization" not in seen["headers"], "sent a credential it does not have"
