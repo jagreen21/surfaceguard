@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "surfaceguard"
+version = "0.1.0"
+description = "Choose a surface in the camera view, turn protection on, and forget about it."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "opencv-python>=4.9",
+    "PySide6-Essentials>=6.8",
+    "websockets>=12",
+    "sounddevice>=0.4",
+]
+
+[project.optional-dependencies]
+# Detection model runtime. Kept optional so the app installs and runs (in demo
+# mode, and for setup) without dragging a 200 MB wheel in.
+detect = ["onnxruntime>=1.17"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+surfaceguard = "surfaceguard.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning"]

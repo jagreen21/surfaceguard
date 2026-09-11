@@ -1,0 +1,30 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Surface Guard (demo, no camera)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "surfaceguard.app",
+      "args": ["--demo"],
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Surface Guard (real camera)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "surfaceguard.app",
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Phase 0 harness (synthetic)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/phase0.py",
+      "args": ["--source", "synthetic"],
+      "console": "integratedTerminal"
+    }
+  ]
+}
