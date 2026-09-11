@@ -83,7 +83,8 @@ class EufySignInDialog(QDialog):
     def __init__(self, account: EufyAccount | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Connect your camera")
-        self.setMinimumSize(560, 460)
+        self.setMinimumSize(560, 440)
+        self.setMaximumWidth(720)        # a form has no business being 1000 px wide
 
         self.account = account or EufyAccount(username="")
         self.supervisor: BridgeSupervisor | None = None
@@ -107,17 +108,21 @@ class EufySignInDialog(QDialog):
         creds = QWidget()
         form = QFormLayout(creds)
         form.setContentsMargins(0, 0, 0, 0)
-        form.setSpacing(9)
-        intro = QLabel(
-            "Surface Guard signs in to Eufy the same way the Eufy app does, and keeps "
-            "your password in the Mac Keychain."
-        )
-        intro.setObjectName("dim")
-        intro.setWordWrap(True)
-        form.addRow(intro)
+        form.setSpacing(11)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        # Without this the fields stay at their size hint and the dialog is mostly
+        # empty, which reads as broken rather than minimal.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.addRow("Email", self.email)
         form.addRow("Password", self.password)
         form.addRow("Region", self.country)
+        reassurance = QLabel(
+            "Your password is stored in the Mac Keychain and is never saved in the "
+            "app's own files."
+        )
+        reassurance.setObjectName("dim")
+        reassurance.setWordWrap(True)
+        form.addRow(reassurance)
 
         # --- challenge -----------------------------------------------------
         challenge = QWidget()
@@ -142,9 +147,7 @@ class EufySignInDialog(QDialog):
         pbox = QVBoxLayout(picker)
         pbox.setContentsMargins(0, 0, 0, 0)
         pbox.setSpacing(9)
-        head = QLabel("Which camera should watch the surfaces?")
-        head.setObjectName("h2")
-        pbox.addWidget(head)
+        # No heading here: the dialog header already asks the question.
         self.devices = QListWidget()
         self.devices.itemDoubleClicked.connect(lambda _: self._advance())
         pbox.addWidget(self.devices, 1)
@@ -152,6 +155,20 @@ class EufySignInDialog(QDialog):
         self.stack = QStackedWidget()
         for page in (creds, challenge, picker):
             self.stack.addWidget(page)
+
+        self.step = QLabel("")
+        self.step.setObjectName("mono")
+        self.heading = QLabel("")
+        self.heading.setObjectName("h1")
+        self.heading.setWordWrap(True)
+        self.subtitle = QLabel("")
+        self.subtitle.setObjectName("dim")
+        self.subtitle.setWordWrap(True)
+        header = QVBoxLayout()
+        header.setSpacing(4)
+        header.addWidget(self.step)
+        header.addWidget(self.heading)
+        header.addWidget(self.subtitle)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -167,13 +184,30 @@ class EufySignInDialog(QDialog):
         nav.addWidget(self.next_btn)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 22, 24, 18)
-        root.setSpacing(14)
+        root.setContentsMargins(28, 26, 28, 20)
+        root.setSpacing(16)
+        root.addLayout(header)
         root.addWidget(self.stack, 1)
         root.addWidget(self.status)
         root.addLayout(nav)
+        self._sync_header()
 
     # -------------------------------------------------------------- stepping
+
+    HEADINGS = {
+        0: ("Step 1 of 3", "Connect your camera",
+            "Sign in with the same account you use in the Eufy app."),
+        1: ("Step 2 of 3", "One more check",
+            "Eufy wants to be sure it is really you."),
+        2: ("Step 3 of 3", "Choose your camera",
+            "Pick the one pointing at the surfaces you want protected."),
+    }
+
+    def _sync_header(self) -> None:
+        step, heading, subtitle = self.HEADINGS[self.stack.currentIndex()]
+        self.step.setText(step.upper())
+        self.heading.setText(heading)
+        self.subtitle.setText(subtitle)
 
     def _advance(self) -> None:
         page = self.stack.currentIndex()
@@ -254,6 +288,7 @@ class EufySignInDialog(QDialog):
             self.challenge_input.clear()
             self.challenge_input.setPlaceholderText("6-digit code")
             self.stack.setCurrentIndex(1)
+            self._sync_header()
             self.next_btn.setText("Continue")
             self.challenge_input.setFocus()
             self._say("")
@@ -264,12 +299,14 @@ class EufySignInDialog(QDialog):
             self.challenge_input.clear()
             self.challenge_input.setPlaceholderText("characters from the picture")
             self.stack.setCurrentIndex(1)
+            self._sync_header()
             self.next_btn.setText("Continue")
             self.challenge_input.setFocus()
             self._say("")
             return
         self._say(state.message or "Eufy refused the sign-in.", bad=True)
         self.stack.setCurrentIndex(0)
+        self._sync_header()
         self.next_btn.setText("Sign in")
 
     def _show_captcha(self, data_uri: str) -> None:
@@ -297,7 +334,8 @@ class EufySignInDialog(QDialog):
         for device in cameras:
             label = device.get("name") or device.get("serialNumber", "camera")
             model = device.get("model", "")
-            item = QListWidgetItem(f"{label}\n{model}  ·  {device.get('serialNumber','')}")
+            item = QListWidgetItem(f"{label}\n{model or 'camera'}")
+            item.setToolTip(str(device.get("serialNumber", "")))
             item.setData(Qt.ItemDataRole.UserRole, device)
             self.devices.addItem(item)
         if not cameras:
@@ -308,6 +346,7 @@ class EufySignInDialog(QDialog):
             return
         self.devices.setCurrentRow(0)
         self.stack.setCurrentIndex(2)
+        self._sync_header()
         self.next_btn.setText("Use this camera")
         self._say(f"Found {len(cameras)} camera{'s' if len(cameras) != 1 else ''}.")
 

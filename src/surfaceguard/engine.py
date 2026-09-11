@@ -225,27 +225,43 @@ class Engine:
         weekday, minute = lt.tm_wday, lt.tm_hour * 60 + lt.tm_min
 
         for surface in surfaces_for_pose(self.prefs.surfaces, pose):
+            # Every cat is judged, not just the first one that qualifies. A
+            # household has more than one, and stopping at the first match logs a
+            # two-cat incident as one event, shows the review a single card for it,
+            # and feeds only one of them to the size model.
             best: Verdict | None = None
+            on_surface: list[Verdict] = []
             for cat in result.cats:
                 verdict = evaluate(surface, pose, cat, result.people, minute)
+                if verdict.on_surface:
+                    on_surface.append(verdict)
                 if best is None or (verdict.on_surface and not best.on_surface):
                     best = verdict
-                if verdict.on_surface:
-                    break
             if best is not None:
                 result.verdicts.append(best)
+            occupancy = len(on_surface)
+            if occupancy > 1:
+                logger.info("%d cats on %s at once", occupancy, surface.name)
 
             decision = self.policy.update(surface, best, now, weekday, minute)
             result.decisions.append(decision)
 
             if decision.fire:
-                self._fire(surface, decision, result)
+                self._fire(surface, decision, result, occupancy=occupancy,
+                           extra=on_surface[1:])
             elif best is not None and not best.on_surface and best.blocked_by != ["inside"]:
                 # Near-misses are worth logging, but "the cat was somewhere else"
                 # is not a near-miss and would bury the log.
                 self._record(surface, decision, result, fired=False, now=now)
 
-    def _fire(self, surface, decision: Decision, result: FrameResult) -> None:
+    def _fire(
+        self,
+        surface,
+        decision: Decision,
+        result: FrameResult,
+        occupancy: int = 1,
+        extra: list | None = None,
+    ) -> None:
         delay = surface.deterrent.delay_s
         if delay > 0:
             time.sleep(min(delay, 5.0))
@@ -268,9 +284,15 @@ class Engine:
         latency_ms = (time.monotonic() - origin) * 1e3
         self.metrics.note_latency(latency_ms)
 
-        if played and decision.verdict is not None and decision.verdict.box is not None:
-            # Only confirmed on-surface detections feed the plane's scale model.
-            surface.observe_height(result.pose, decision.verdict.box)
+        if played:
+            # Every cat that was on the surface feeds the size model, so a
+            # household of differing sizes widens the band instead of one of them
+            # permanently looking wrong.
+            seen = [decision.verdict] if decision.verdict is not None else []
+            seen += list(extra or [])
+            for verdict in seen:
+                if verdict is not None and verdict.box is not None and verdict.on_surface:
+                    surface.observe_height(result.pose, verdict.box)
 
         self.state.note_alert()
         self._record(surface, decision, result, fired=played, latency_ms=latency_ms,

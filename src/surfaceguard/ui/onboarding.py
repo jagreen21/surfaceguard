@@ -84,12 +84,23 @@ class OnboardingDialog(QDialog):
         parent: QWidget | None = None,
         allow_demo: bool = True,
         preselect: str = "",
+        existing_source: CameraSource | None = None,
     ) -> None:
+        """``existing_source`` is a camera that is already connected.
+
+        Without it this dialog asks how to connect — which, run straight after the
+        sign-in dialog, means asking someone to connect the camera they have just
+        connected. When it is supplied the connect page is skipped and no second
+        source or bridge is ever created.
+        """
         super().__init__(parent)
         self.setWindowTitle("Set up Surface Guard")
         self.setMinimumSize(720, 520)
         self.source: CameraSource | None = None
         self.room: RoomMap | None = None
+        # True when the camera was handed in rather than connected here, so
+        # cancelling must not stop a camera the rest of the app is using.
+        self.adopted = False
         self._thread: QThread | None = None
         self._worker: _ScanWorker | None = None
 
@@ -196,6 +207,11 @@ class OnboardingDialog(QDialog):
             if index >= 0:
                 self.kind.setCurrentIndex(index)
         self._sync_connect_fields()
+        if existing_source is not None:
+            self.source = existing_source
+            self.adopted = True
+            self.stack.setCurrentIndex(1)
+            self._pump_preview()
         self._sync_nav()
 
     # ---------------------------------------------------------------- helpers
@@ -235,13 +251,15 @@ class OnboardingDialog(QDialog):
 
     def _sync_nav(self) -> None:
         index = self.stack.currentIndex()
-        self.back_btn.setEnabled(index > 0 and index != 2)
+        floor = 1 if self.adopted else 0
+        self.back_btn.setEnabled(index > floor and index != 2)
         labels = {0: "Connect", 1: "Yes, that’s right", 2: "Start looking around",
                   3: "Continue", 4: "Draw a surface"}
         self.next_btn.setText(labels.get(index, "Continue"))
 
     def _back(self) -> None:
-        self.stack.setCurrentIndex(max(0, self.stack.currentIndex() - 1))
+        floor = 1 if self.adopted else 0
+        self.stack.setCurrentIndex(max(floor, self.stack.currentIndex() - 1))
         self._sync_nav()
 
     def _next(self) -> None:
@@ -354,3 +372,13 @@ def _build_source(choice: SetupChoice) -> CameraSource:
         return RtspCamera(choice.url)
     from ..camera.sources.eufy_bridge import EufyBridgeCamera
     return EufyBridgeCamera(url=choice.url, serial=choice.serial or None)
+
+
+def _adopted_reject(self) -> None:
+    """Bound onto OnboardingDialog below; keeps the override next to its reason."""
+    if self.adopted:
+        self.source = None
+    QDialog.reject(self)
+
+
+OnboardingDialog.reject = _adopted_reject

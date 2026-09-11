@@ -23,7 +23,15 @@ from ..geometry.projection import Box
 COCO_CAT = 15
 COCO_PERSON = 0
 
-MODEL_FILENAME = "yolov8n.onnx"
+# yolov8m, not yolov8n. Measured on this machine at 960x540 with CoreML:
+#   n  13 MB   9.2 ms   ~37 COCO mAP
+#   s  45 MB  12.0 ms   ~45
+#   m 104 MB  17.7 ms   ~50
+# The §7 budget is 40 ms, so the largest of the three fits with room to spare, and
+# accuracy matters more here than bundle size: she downloads the app once, and
+# model updates ship on their own channel afterwards.
+MODEL_FILENAMES = ("yolov8m.onnx", "yolov8s.onnx", "yolov8n.onnx")
+MODEL_FILENAME = MODEL_FILENAMES[0]
 
 
 def bundled_model_path() -> Path | None:
@@ -32,14 +40,19 @@ def bundled_model_path() -> Path | None:
     Inside the .app it sits in Resources; in a checkout it sits in models/. She
     should never have to know either of those things.
     """
-    candidates = []
+    roots = []
     frozen = getattr(sys, "_MEIPASS", None)
     if frozen:
-        candidates += [Path(frozen) / "models" / MODEL_FILENAME,
-                       Path(sys.executable).resolve().parent.parent / "Resources"
-                       / "models" / MODEL_FILENAME]
-    candidates.append(Path(__file__).resolve().parents[3] / "models" / MODEL_FILENAME)
-    return next((p for p in candidates if p.exists()), None)
+        roots += [Path(frozen) / "models",
+                  Path(sys.executable).resolve().parent.parent / "Resources" / "models"]
+    roots.append(Path(__file__).resolve().parents[3] / "models")
+    # Preference order, so a hand-dropped smaller model is still picked up if the
+    # bundled one is removed to save space.
+    for name in MODEL_FILENAMES:
+        for root in roots:
+            if (root / name).exists():
+                return root / name
+    return None
 
 
 @dataclass

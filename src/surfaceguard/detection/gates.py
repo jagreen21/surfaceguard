@@ -121,8 +121,9 @@ def evaluate(
     ))
 
     # --- apparent size consistent with the surface plane ------------------
-    expected = surface.expected_height(pose, paw) if inside else None
-    if expected is None or expected <= 1.0:
+    tol = surface.scale_tolerance(SCALE_TOLERANCE)
+    band = surface.accepted_height_range(pose, paw, tol) if inside else None
+    if band is None or band[1] <= 1.0:
         add(GateResult(
             "scale",
             Status.UNAVAILABLE,
@@ -130,13 +131,17 @@ def evaluate(
             required=False,
         ))
     else:
-        ratio = cat.height / expected
-        tol = surface.scale_tolerance(SCALE_TOLERANCE)
-        ok = (1.0 / tol) <= ratio <= tol
+        # A band from the observed spread, not a ratio against one median: a house
+        # with two differently sized cats would otherwise settle on a value that
+        # fits neither and start rejecting the smaller one.
+        low, high = band
+        ok = low <= cat.height <= high
+        expected = surface.expected_height(pose, paw) or 0.0
         add(GateResult(
             "scale",
             Status.PASS if ok else Status.FAIL,
-            f"{cat.height:.0f} px observed vs {expected:.0f} px expected ({ratio:.2f}x)",
+            f"{cat.height:.0f} px observed, {low:.0f}-{high:.0f} px expected "
+            f"(typical {expected:.0f})",
             required=surface.scale_gate_is_required,
         ))
 

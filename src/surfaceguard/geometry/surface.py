@@ -195,6 +195,30 @@ class Surface:
     def calibration_samples(self) -> int:
         return len(self.height_samples)
 
+    def accepted_height_range(
+        self, pose: Pose, paw: tuple[float, float], tolerance: float
+    ) -> tuple[float, float] | None:
+        """The band of on-screen heights that count as "a cat standing here".
+
+        A household has more than one cat, and a median across two sizes fits
+        neither. Measured: a single median tolerates about a 2x spread before it
+        starts rejecting one of them, which a kitten and an adult exceed easily.
+
+        So the band is built from the observed spread rather than a point: the
+        10th and 90th percentiles of what has actually been seen, each widened by
+        the tolerance. With one cat it collapses to the old behaviour; with
+        several it widens to hold them all, and still rejects the 2-3x errors the
+        gate exists for (a cat mid-leap, or one much nearer the camera).
+        """
+        if not self.height_samples:
+            return None
+        w = self.plane_weight(pose, paw)
+        if w is None:
+            return None
+        lo_k = float(np.percentile(self.height_samples, 10))
+        hi_k = float(np.percentile(self.height_samples, 90))
+        return (lo_k * w / tolerance, hi_k * w * tolerance)
+
     def expected_height(self, pose: Pose, paw: tuple[float, float]) -> float | None:
         """Predicted on-screen height of a cat standing at ``paw`` on this surface.
 

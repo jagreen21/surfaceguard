@@ -20,13 +20,28 @@ from surfaceguard.geometry.projection import Box
 
 REFERENCE_IMAGE = "tests/assets/bus.jpg"
 
-# What Ultralytics itself reports for bus.jpg at conf=0.35, imgsz=640.
-ULTRALYTICS_BUS = [
-    ("person", 0.891, (670, 381, 810, 880)),
-    ("person", 0.883, (222, 407, 344, 856)),
-    ("person", 0.878, (51, 397, 244, 905)),
-    ("person", 0.436, (0, 550, 58, 868)),
-]
+# What Ultralytics itself reports for bus.jpg at conf=0.35, imgsz=640, per model.
+# Regenerate with packaging/export_model.py if a model is ever re-exported.
+ULTRALYTICS_BUS = {
+    "yolov8n.onnx": [
+        ("person", 0.891, (670, 381, 810, 880)),
+        ("person", 0.883, (222, 407, 344, 856)),
+        ("person", 0.878, (51, 397, 244, 905)),
+        ("person", 0.436, (0, 550, 58, 868)),
+    ],
+    "yolov8s.onnx": [
+        ("person", 0.915, (50, 398, 247, 904)),
+        ("person", 0.885, (666, 393, 809, 879)),
+        ("person", 0.846, (223, 407, 348, 859)),
+        ("person", 0.608, (0, 551, 75, 874)),
+    ],
+    "yolov8m.onnx": [
+        ("person", 0.937, (50, 400, 248, 903)),
+        ("person", 0.908, (223, 410, 345, 860)),
+        ("person", 0.888, (668, 395, 809, 881)),
+        ("person", 0.654, (1, 548, 78, 872)),
+    ],
+}
 
 
 def iou(a, b) -> float:
@@ -164,12 +179,17 @@ def test_real_model_matches_ultralytics_on_the_reference_image():
     """
     import cv2
 
-    det = OnnxDetector(bundled_model_path(), conf=0.35)
+    model = bundled_model_path()
+    reference = ULTRALYTICS_BUS.get(model.name)
+    if reference is None:
+        pytest.skip(f"no reference output recorded for {model.name}")
+
+    det = OnnxDetector(model, conf=0.35)
     boxes = det.detect(cv2.imread(REFERENCE_IMAGE))
     _cats, people = Detector.split(boxes)
-    assert len(people) == len(ULTRALYTICS_BUS), f"expected 4 people, got {len(people)}"
+    assert len(people) == len(reference), f"expected {len(reference)} people, got {len(people)}"
 
-    for _label, ref_score, ref_box in ULTRALYTICS_BUS:
+    for _label, ref_score, ref_box in reference:
         best = max(people, key=lambda b: iou((b.x1, b.y1, b.x2, b.y2), ref_box))
         overlap = iou((best.x1, best.y1, best.x2, best.y2), ref_box)
         assert overlap > 0.98, f"box {ref_box} only matched at IoU {overlap:.3f}"

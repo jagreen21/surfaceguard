@@ -25,8 +25,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
 ASSETS = ROOT / "tests" / "assets"
-WEIGHTS = "yolov8n.pt"
-OUTPUT = "yolov8n.onnx"
+WEIGHTS = "yolov8m.pt"
+OUTPUT = "yolov8m.onnx"
 # Ultralytics' standard sample; the detector test compares against the exporter's
 # own inference on it, which is the only way to know the decoder is right.
 REFERENCE = "bus.jpg"
@@ -43,6 +43,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--keep-venv", action="store_true", help="do not delete the export venv")
     ap.add_argument("--imgsz", type=int, default=640)
+    ap.add_argument("--weights", default=WEIGHTS,
+                    help="yolov8n/s/m .pt; m fits the 40 ms budget on Apple silicon")
     args = ap.parse_args()
 
     MODELS.mkdir(parents=True, exist_ok=True)
@@ -59,7 +61,7 @@ def main() -> int:
 
     script = (
         "from ultralytics import YOLO\n"
-        f"m = YOLO('{WEIGHTS}')\n"
+        f"m = YOLO('{args.weights}')\n"
         "names = m.names\n"
         "assert 'cat' in names.values() and 'person' in names.values()\n"
         f"p = m.export(format='onnx', imgsz={args.imgsz}, opset=12, dynamic=False)\n"
@@ -74,8 +76,8 @@ def main() -> int:
         exported = work / OUTPUT
     if not exported.exists():
         raise SystemExit(f"export produced no file\n{out.stdout[-800:]}")
-    shutil.copy2(exported, MODELS / OUTPUT)
-    print(f"  model -> {MODELS / OUTPUT} ({(MODELS / OUTPUT).stat().st_size / 1e6:.1f} MB)")
+    shutil.copy2(exported, MODELS / exported.name)
+    print(f"  model -> {MODELS / exported.name} ({(MODELS / exported.name).stat().st_size / 1e6:.1f} MB)")
 
     if not (ASSETS / REFERENCE).exists():
         print("Fetching the reference image for the decoder test…")
