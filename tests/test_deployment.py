@@ -468,3 +468,39 @@ def test_launch_at_login_from_source_still_uses_dash_m(tmp_path, monkeypatch):
     mod.set_launch_at_login(True, executable="/usr/bin/python3")
     argv = plistlib.loads(agent.read_bytes())["ProgramArguments"]
     assert argv[1:3] == ["-m", "surfaceguard.app"]
+
+
+def test_the_build_bundles_only_the_model_that_can_load(tmp_path, monkeypatch):
+    """models/ accumulates every export; shipping one the app can never reach is
+    megabytes of pure download."""
+    import sys
+
+    sys.path.insert(0, "packaging")
+    import build_app
+
+    monkeypatch.setattr(build_app, "ROOT", tmp_path)
+    (tmp_path / "models").mkdir()
+    assert build_app._preferred_model() is None, "no models should mean no model"
+
+    (tmp_path / "models" / "yolov8n.onnx").write_bytes(b"n")
+    assert build_app._preferred_model().name == "yolov8n.onnx"
+
+    (tmp_path / "models" / "yolov8m.onnx").write_bytes(b"m")
+    assert build_app._preferred_model().name == "yolov8m.onnx", (
+        "the build must pick the same model cat_detector will load"
+    )
+
+
+def test_build_and_detector_agree_on_model_preference():
+    """Two preference lists that drift ship a model the app then ignores."""
+    import sys
+
+    sys.path.insert(0, "packaging")
+    import build_app
+
+    from surfaceguard.detection.cat_detector import MODEL_FILENAMES
+
+    import inspect
+    source = inspect.getsource(build_app._preferred_model)
+    for name in MODEL_FILENAMES:
+        assert name in source, f"build_app does not know about {name}"

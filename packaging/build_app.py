@@ -124,13 +124,12 @@ def info_plist(version: str) -> dict:
 def build(args) -> Path:
     if not (RUNTIME / "node" / "bin" / "node").exists():
         raise SystemExit(
-            "runtime/ is missing. Run: python packaging/fetch_runtime.py"
+            "runtime/ is missing. Run: make runtime"
         )
-    model = ROOT / "models" / "yolov8n.onnx"
-    if args.with_onnx and not model.exists():
+    model = _preferred_model()
+    if args.with_onnx and model is None:
         raise SystemExit(
-            f"--with-onnx needs a detection model at {model}. "
-            "See README: export one with packaging/export_model.py"
+            f"--with-onnx needs a detection model in {ROOT / 'models'}. Run: make model"
         )
     for path in (DIST, BUILD):
         shutil.rmtree(path, ignore_errors=True)
@@ -145,7 +144,9 @@ def build(args) -> Path:
             "--paths", str(SRC),
             # The whole Node + bridge runtime rides along inside Resources.
             "--add-data", f"{RUNTIME}:runtime",
-            "--add-data", f"{ROOT / 'models'}:models",
+            # Only the model that will actually load. models/ accumulates every
+            # export, and shipping one the app can never reach is pure download.
+            "--add-data", f"{_preferred_model()}:models",
             "--collect-submodules", "surfaceguard",
             "--hidden-import", "surfaceguard.app",
             "--collect-binaries", "av",
@@ -206,6 +207,19 @@ def build(args) -> Path:
     size = sum(f.stat().st_size for f in app.rglob("*") if f.is_file())
     log(f"built {app} ({size / 1e6:.0f} MB)")
     return app
+
+
+def _preferred_model() -> Path | None:
+    """The single model this build should carry.
+
+    cat_detector prefers yolov8m, then s, then n, and stops at the first it finds,
+    so bundling the others adds megabytes that can never be loaded.
+    """
+    for name in ("yolov8m.onnx", "yolov8s.onnx", "yolov8n.onnx"):
+        candidate = ROOT / "models" / name
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def entitlements_file() -> Path:
