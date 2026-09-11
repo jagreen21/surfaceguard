@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -12,6 +13,34 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+class BrandMark(QWidget):
+    """Small shield-and-cat mark drawn natively so it stays crisp at any scale."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFixedSize(30, 30)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#2a3540"))
+        painter.drawRoundedRect(self.rect(), 7, 7)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#eef5f8"), 1.25))
+        shield = QPainterPath()
+        shield.moveTo(7, 7); shield.lineTo(15, 5); shield.lineTo(23, 7)
+        shield.lineTo(22, 18); shield.quadTo(20, 23, 15, 25)
+        shield.quadTo(10, 23, 8, 18); shield.closeSubpath()
+        painter.drawPath(shield)
+        cat = QPainterPath()
+        cat.moveTo(10, 13); cat.lineTo(10, 10); cat.lineTo(13, 12)
+        cat.quadTo(15, 11, 17, 12); cat.lineTo(20, 10); cat.lineTo(20, 14)
+        cat.quadTo(20, 19, 15, 19); cat.quadTo(10, 19, 10, 14)
+        painter.drawPath(cat)
+        painter.drawPoint(13, 15); painter.drawPoint(17, 15)
 
 
 class GlassCard(QFrame):
@@ -101,10 +130,25 @@ class ActionCard(GlassCard):
         self.detail = QLabel(detail)
         self.detail.setObjectName("muted")
         self.detail.setWordWrap(True)
-        self.box.addWidget(self.eyebrow)
-        self.box.addWidget(self.title)
+        copy = QVBoxLayout()
+        copy.setContentsMargins(0, 0, 0, 0)
+        copy.setSpacing(3)
+        copy.addWidget(self.eyebrow)
+        copy.addWidget(self.title)
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.addLayout(copy, 1)
+        self.trailing = QHBoxLayout()
+        self.trailing.setContentsMargins(0, 0, 0, 0)
+        head.addLayout(self.trailing)
+        self.box.addLayout(head)
         self.box.addWidget(self.detail)
-        self.box.addStretch(1)
+
+    def add_trailing(self, widget: QWidget) -> None:
+        self.trailing.addWidget(widget)
+
+    def add_control(self, widget: QWidget) -> None:
+        self.box.addWidget(widget)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -140,4 +184,3 @@ class EmptyState(GlassCard):
             button.clicked.connect(self.action_requested.emit)
             self.box.addWidget(button, 0, Qt.AlignmentFlag.AlignCenter)
         self.box.addStretch(1)
-

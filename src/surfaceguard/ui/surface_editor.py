@@ -32,7 +32,7 @@ from ..geometry.projection import Pose, transform_points
 from ..geometry.surface import Surface
 from . import qtutil as Q
 
-HANDLE_R = 6
+HANDLE_R = 8
 MIN_POINTS = 3
 
 
@@ -167,8 +167,8 @@ class MapCanvas(QWidget):
         selected = surface is self.selected
         poly = QPolygonF([self.map_to_view(pt) for pt in surface.polygon])
         if surface.enabled:
-            edge = Q.ACCENT if selected else Q.INK
-            fill = QColor(79, 180, 207, 70) if selected else QColor(230, 237, 242, 34)
+            edge = Q.BAD
+            fill = QColor(255, 92, 87, 72 if selected else 48)
         else:
             edge, fill = Q.INK_DIM, QColor(154, 168, 179, 22)
 
@@ -185,8 +185,8 @@ class MapCanvas(QWidget):
                    Qt.AlignmentFlag.AlignCenter, label)
 
         if selected:
-            p.setPen(QPen(Q.ACCENT, 1.5))
-            p.setBrush(QBrush(Q.GROUND))
+            p.setPen(QPen(Q.BAD, 1.5))
+            p.setBrush(QBrush(Qt.GlobalColor.white))
             for pt in surface.polygon:
                 v = self.map_to_view(pt)
                 p.drawEllipse(v, HANDLE_R, HANDLE_R)
@@ -198,11 +198,11 @@ class MapCanvas(QWidget):
         else:
             pts_preview = pts
         if len(pts_preview) >= 2:
-            p.setPen(QPen(Q.CAT, 2.0, Qt.PenStyle.DashLine))
-            p.setBrush(QBrush(QColor(240, 193, 75, 46)))
+            p.setPen(QPen(Q.BAD, 2.2, Qt.PenStyle.SolidLine))
+            p.setBrush(QBrush(QColor(255, 92, 87, 56)))
             p.drawPolygon(QPolygonF(pts_preview))
-        p.setPen(QPen(Q.CAT, 1.5))
-        p.setBrush(QBrush(Q.GROUND))
+        p.setPen(QPen(Q.BAD, 1.7))
+        p.setBrush(QBrush(Qt.GlobalColor.white))
         for v in pts:
             p.drawEllipse(v, HANDLE_R - 1, HANDLE_R - 1)
         if pts:
@@ -276,6 +276,7 @@ class SurfaceEditor(QWidget):
     """Map canvas, surface list, and the per-surface deterrent settings."""
 
     surfaces_changed = Signal()
+    test_sound_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -286,18 +287,31 @@ class SurfaceEditor(QWidget):
         self.list = QListWidget()
         self.list.currentRowChanged.connect(self._on_row)
 
-        self.add_btn = QPushButton("Draw a new surface")
+        self.add_btn = QPushButton("Add Protection Zone")
         self.add_btn.setObjectName("primary")
         self.add_btn.clicked.connect(self.begin_drawing)
-        self.done_btn = QPushButton("Finish shape")
+        self.done_btn = QPushButton("Save Zone")
+        self.done_btn.setObjectName("primary")
         self.done_btn.clicked.connect(self.commit_drawing)
         self.done_btn.setVisible(False)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.cancel_drawing)
+        self.cancel_btn.setVisible(False)
         self.del_btn = QPushButton("Delete")
         self.del_btn.setObjectName("danger")
         self.del_btn.clicked.connect(self.delete_selected)
 
         self.settings = _DeterrentPanel()
         self.settings.changed.connect(self._on_canvas_changed)
+        self.settings.test.clicked.connect(self.test_sound_requested.emit)
+
+        self.pending_name = QComboBox()
+        self.pending_name.setEditable(True)
+        self.pending_name.addItems([
+            "Kitchen Counter", "Dining Table", "Coffee Table", "TV Stand",
+            "Desk", "Shelf", "Custom",
+        ])
+        self.pending_name.setVisible(False)
 
         left = QVBoxLayout()
         left.setSpacing(8)
@@ -316,14 +330,17 @@ class SurfaceEditor(QWidget):
         right.addWidget(self.list, 1)
         row = QHBoxLayout()
         row.addWidget(self.add_btn)
+        row.addWidget(self.pending_name, 1)
         row.addWidget(self.done_btn)
+        row.addWidget(self.cancel_btn)
         row.addWidget(self.del_btn)
         right.addLayout(row)
         right.addWidget(self.settings)
 
         holder = QFrame()
         holder.setObjectName("panel")
-        holder.setFixedWidth(320)
+        holder.setMinimumWidth(280)
+        holder.setMaximumWidth(350)
         holder.setLayout(right)
 
         root = QHBoxLayout(self)
@@ -352,7 +369,13 @@ class SurfaceEditor(QWidget):
 
     def begin_drawing(self) -> None:
         self.canvas.start_drawing()
+        suggestion = "Kitchen Counter" if not self.canvas.surfaces else f"Surface {len(self.canvas.surfaces) + 1}"
+        self.pending_name.setCurrentText(suggestion)
         self.canvas.setFocus()
+        self._refresh_buttons()
+
+    def cancel_drawing(self) -> None:
+        self.canvas.cancel_drawing()
         self._refresh_buttons()
 
     def commit_drawing(self) -> None:
@@ -363,7 +386,7 @@ class SurfaceEditor(QWidget):
                 "counter or table, then press Enter.",
             )
             return
-        name = f"Surface {len(self.canvas.surfaces) + 1}"
+        name = self.pending_name.currentText().strip() or f"Surface {len(self.canvas.surfaces) + 1}"
         surface = self.canvas.finish_drawing(name)
         self._rebuild_list()
         self._refresh_buttons()
@@ -424,6 +447,8 @@ class SurfaceEditor(QWidget):
         drawing = self.canvas.draw_mode
         self.add_btn.setVisible(not drawing)
         self.done_btn.setVisible(drawing)
+        self.pending_name.setVisible(drawing)
+        self.cancel_btn.setVisible(drawing)
         self.del_btn.setEnabled(self.canvas.selected is not None and not drawing)
 
 

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -29,7 +30,8 @@ from ..engine import FrameResult
 from ..geometry.projection import transform_points
 from ..state import AppState, Phase
 from . import qtutil as Q
-from .components import ActionCard, GlassCard, PageHeader, StatusPill
+from .components import ActionCard, GlassCard
+from .review import ReviewInvite
 
 
 class LiveView(QWidget):
@@ -51,6 +53,7 @@ class LiveView(QWidget):
         self._show_boxes = True
         self._show_labels = True
         self._room_name = "Kitchen"
+        self._camera_name = ""
 
     def set_overlays(self, zones: bool, boxes: bool, labels: bool) -> None:
         self._show_zones = zones
@@ -60,6 +63,10 @@ class LiveView(QWidget):
 
     def set_room_name(self, name: str) -> None:
         self._room_name = name
+        self.update()
+
+    def set_camera_name(self, name: str) -> None:
+        self._camera_name = name
         self.update()
 
     def update_result(self, result: FrameResult, surfaces: list) -> None:
@@ -111,20 +118,23 @@ class LiveView(QWidget):
                     qpoly.append(QPointF(x, y))
                 hot = any(v.surface_id == surface.id and v.on_surface for v in result.verdicts)
                 violation = violation or hot
-                p.setPen(QPen(Q.BAD if hot else Q.GOOD, 2.2))
-                p.setBrush(QBrush(QColor(237, 98, 93, 70) if hot else QColor(73, 184, 121, 44)))
+                p.setPen(QPen(Q.BAD, 2.2))
+                p.setBrush(QBrush(QColor(255, 92, 87, 66)))
                 p.drawPolygon(qpoly)
+                p.setBrush(QBrush(Qt.GlobalColor.white))
+                for point in qpoly:
+                    p.drawEllipse(point, 3.5, 3.5)
                 if self._show_labels:
                     p.setPen(Q.INK)
                     f = p.font(); f.setPointSize(10); p.setFont(f)
                     r = qpoly.boundingRect()
                     p.drawText(QRect(int(r.x()), int(r.y()) - 18, 220, 16),
                                Qt.AlignmentFlag.AlignLeft, surface.name)
-        else:
+        elif self._surfaces and self._show_zones:
             p.setPen(Q.WARN)
             p.drawText(QRect(ox + 8, oy + 8, self.width() - 20, 18),
                        Qt.AlignmentFlag.AlignLeft,
-                       "Camera view not recognised — " + (result.registration_reason or "no pose"))
+                       _friendly_registration_message(result.registration_reason))
 
         if self._show_boxes:
             for box, colour, label in (
@@ -146,12 +156,17 @@ class LiveView(QWidget):
 
         # Camera identity and detection context stay small and local to the video.
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(12, 18, 14, 205))
+        p.setBrush(QColor(8, 16, 22, 210))
         p.drawRoundedRect(QRect(12, 12, max(112, len(self._room_name) * 8 + 34), 28), 8, 8)
         p.setPen(Q.INK)
         f = p.font(); f.setPointSize(10); p.setFont(f)
         p.drawText(QRect(23, 12, 190, 28), Qt.AlignmentFlag.AlignVCenter,
                    "●  " + self._room_name)
+        if self._camera_name:
+            p.setPen(Qt.GlobalColor.white)
+            p.drawText(QRect(self.width() - 180, self.height() - 30, 166, 20),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       self._camera_name)
         if violation:
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(171, 48, 47, 224))
@@ -170,24 +185,56 @@ class HomeScreen(QWidget):
     test_sound_requested = Signal()
     navigate_requested = Signal(str)
     activity_requested = Signal()
+    review_requested = Signal()
+    review_declined = Signal()
+    review_silenced = Signal()
 
     def __init__(self) -> None:
         super().__init__()
         self.live = LiveView()
         self.live.setObjectName("heroView")
 
+        # A slim titlebar mirrors the approved desktop render without replacing
+        # the native macOS chrome.
+        self.clock = QLabel("")
+        self.clock.setObjectName("muted")
+        settings = QPushButton("⚙")
+        settings.setFixedSize(30, 30)
+        settings.setStyleSheet("padding: 0; font-size: 16px;")
+        settings.setToolTip("Settings")
+        settings.clicked.connect(lambda: self.navigate_requested.emit("Settings"))
+        topbar = QHBoxLayout()
+        topbar.addStretch(1)
+        topbar.addWidget(self.clock)
+        topbar.addWidget(settings)
+
         self.headline = QLabel("Starting up")
-        self.headline.setObjectName("cardValue")
+        self.headline.setObjectName("cardTitle")
         self.detail = QLabel("")
         self.detail.setObjectName("dim")
         self.detail.setWordWrap(True)
         self.remedy = QLabel("")
+        self.remedy.setObjectName("dim")
         self.remedy.setWordWrap(True)
-        self.remedy.setVisible(False)
         self.dot = QLabel("●")
+        self.attention_action = QPushButton("Continue")
+        self.attention_action.setObjectName("primary")
+        self.attention_action.clicked.connect(self._toggle)
+        self.attention_card = GlassCard(compact=True)
+        attention_top = QHBoxLayout()
+        attention_top.addWidget(self.dot)
+        attention_top.addWidget(self.headline)
+        attention_top.addStretch(1)
+        attention_top.addWidget(self.attention_action)
+        self.attention_card.box.addLayout(attention_top)
+        self.attention_card.box.addWidget(self.detail)
+        self.attention_card.box.addWidget(self.remedy)
+        self.attention_card.setVisible(False)
 
-        self.protect_btn = QPushButton("Turn protection on")
-        self.protect_btn.setObjectName("primary")
+        self.protect_btn = QPushButton(" ")
+        self.protect_btn.setObjectName("toggleButton")
+        self.protect_btn.setCheckable(True)
+        self.protect_btn.setToolTip("Turn protection on or off")
         self.protect_btn.clicked.connect(self._toggle)
         self.pause30 = QPushButton("Pause 30 minutes")
         self.pause30.clicked.connect(lambda: self.pause_requested.emit(1800.0))
@@ -199,31 +246,13 @@ class HomeScreen(QWidget):
         self.test_btn.clicked.connect(self.test_sound_requested.emit)
 
         self.coverage = QLabel("")
-        self.coverage.setObjectName("mono")
         self.coverage.setTextFormat(Qt.TextFormat.RichText)
         self.coverage.setWordWrap(True)
-        self.last_event = QLabel("Nothing yet today.")
-        self.last_event.setObjectName("dim")
-        self.last_event.setWordWrap(True)
 
-        self.header = PageHeader("Home", "Your protected spaces at a glance.")
-
-        status_card = GlassCard(compact=True)
-        status_card.setObjectName("glassCard")
-        top = QHBoxLayout()
-        top.setSpacing(9)
-        top.addWidget(self.dot)
-        top.addWidget(self.headline)
-        top.addStretch(1)
-        top.addWidget(self.protect_btn)
-        status_card.box.addLayout(top)
-        status_card.box.addWidget(self.detail)
-        status_card.box.addWidget(self.remedy)
-        controls = QHBoxLayout()
-        controls.addWidget(self.pause30)
-        controls.addWidget(self.pause_tomorrow)
-        controls.addStretch(1)
-        status_card.box.addLayout(controls)
+        self.invite = ReviewInvite()
+        self.invite.accepted.connect(self.review_requested.emit)
+        self.invite.declined.connect(self.review_declined.emit)
+        self.invite.silenced.connect(self.review_silenced.emit)
 
         hero = QFrame()
         hero.setObjectName("heroFrame")
@@ -231,9 +260,18 @@ class HomeScreen(QWidget):
         hero_box.setContentsMargins(1, 1, 1, 1)
         hero_box.addWidget(self.live)
 
-        self.protection_card = ActionCard("PROTECTION", "Active", "Kitchen counter")
-        self.detection_card = ActionCard("DETECTION SENSITIVITY", "Balanced", "Change how readily cats are noticed")
-        self.audio_card = ActionCard("AUDIO RESPONSE", "Short hiss", "Plays through this Mac")
+        self.protection_card = ActionCard("◈  PROTECTION", "Active", "Kitchen Counter  ·  24/7")
+        self.protection_card.add_trailing(self.protect_btn)
+        self.detection_card = ActionCard("◉  DETECTION SENSITIVITY", "Balanced", "Medium")
+        self.detection_meter = QSlider(Qt.Orientation.Horizontal)
+        self.detection_meter.setRange(0, 2)
+        self.detection_meter.setValue(1)
+        self.detection_meter.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.detection_card.add_control(self.detection_meter)
+        self.audio_card = ActionCard("◖  AUDIO RESPONSE", "Short hiss", "This Mac")
+        chevron = QLabel("›")
+        chevron.setStyleSheet("font-size: 24px; color: #96a4ad")
+        self.audio_card.add_trailing(chevron)
         self.protection_card.activated.connect(lambda: self.navigate_requested.emit("Rooms"))
         self.detection_card.activated.connect(lambda: self.navigate_requested.emit("Detection"))
         self.audio_card.activated.connect(lambda: self.navigate_requested.emit("Audio"))
@@ -242,15 +280,9 @@ class HomeScreen(QWidget):
         for i, card in enumerate((self.protection_card, self.detection_card, self.audio_card)):
             quick.addWidget(card, 0, i)
 
-        coverage_card = GlassCard(compact=True)
-        coverage_title = QLabel("Protected surfaces")
-        coverage_title.setObjectName("cardTitle")
-        coverage_card.box.addWidget(coverage_title)
-        coverage_card.box.addWidget(self.coverage)
-
         recent_card = GlassCard(compact=True)
         recent_row = QHBoxLayout()
-        recent = QLabel("Recent activity")
+        recent = QLabel("Events")
         recent.setObjectName("cardTitle")
         see_all = QPushButton("View all")
         see_all.setObjectName("secondary")
@@ -259,22 +291,35 @@ class HomeScreen(QWidget):
         recent_row.addStretch(1)
         recent_row.addWidget(see_all)
         recent_card.box.addLayout(recent_row)
-        recent_card.box.addWidget(self.last_event)
-
-        lower = QHBoxLayout()
-        lower.setSpacing(12)
-        lower.addWidget(coverage_card, 1)
-        lower.addWidget(recent_card, 1)
+        self.event_rows: list[QLabel] = []
+        self.event_thumbs: list[QLabel] = []
+        for _ in range(3):
+            row = QLabel("")
+            row.setObjectName("eventRow")
+            row.setTextFormat(Qt.TextFormat.RichText)
+            row.setWordWrap(True)
+            thumb = QLabel("")
+            thumb.setFixedSize(76, 32)
+            thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            line = QHBoxLayout()
+            line.setContentsMargins(0, 0, 0, 0)
+            line.addWidget(row, 1)
+            line.addWidget(thumb)
+            self.event_rows.append(row)
+            self.event_thumbs.append(thumb)
+            recent_card.box.addLayout(line)
+        self.last_event = self.event_rows[0]
 
         content = QWidget()
         body = QVBoxLayout(content)
-        body.setContentsMargins(22, 20, 22, 22)
-        body.setSpacing(14)
-        body.addWidget(self.header)
-        body.addWidget(status_card)
+        body.setContentsMargins(12, 12, 12, 12)
+        body.setSpacing(10)
+        body.addLayout(topbar)
+        body.addWidget(self.attention_card)
+        body.addWidget(self.invite)
         body.addWidget(hero, 1)
         body.addLayout(quick)
-        body.addLayout(lower)
+        body.addWidget(recent_card)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -288,8 +333,13 @@ class HomeScreen(QWidget):
     def set_context(self, room_name: str, surface_summary: str, sensitivity: str,
                     audio_name: str, audio_target: str) -> None:
         self.live.set_room_name(room_name)
+        self.clock.setText(time.strftime("%a, %b %d  •  %I:%M %p").replace(" 0", " "))
         self.protection_card.detail.setText(surface_summary)
         self.detection_card.title.setText(sensitivity)
+        self.detection_card.detail.setText({
+            "Calm": "Low", "Balanced": "Medium", "Sensitive": "High"
+        }.get(sensitivity, sensitivity))
+        self.detection_meter.setValue({"Calm": 0, "Balanced": 1, "Sensitive": 2}.get(sensitivity, 1))
         self.audio_card.title.setText(audio_name)
         self.audio_card.detail.setText(audio_target)
 
@@ -306,12 +356,19 @@ class HomeScreen(QWidget):
         self.remedy.setStyleSheet(f"color: {Q.WARN.name()};")
 
         guarding = state.phase in (Phase.GUARDING, Phase.ALERTING, Phase.STARTING, Phase.PROBLEM)
+        self.protect_btn.blockSignals(True)
+        self.protect_btn.setChecked(guarding)
+        self.protect_btn.blockSignals(False)
+        show_attention = state.phase in (Phase.NEEDS_SETUP, Phase.PROBLEM, Phase.PAUSED)
+        self.attention_card.setVisible(show_attention)
         if state.phase is Phase.NEEDS_SETUP:
-            # Stays enabled: it routes to the step that is actually missing, which
-            # is more use than a dead button on an otherwise empty screen.
-            self.protect_btn.setText("Finish setup")
+            self.attention_action.setText("Finish setup")
+        elif state.phase is Phase.PROBLEM:
+            self.attention_action.setText("Turn protection off")
+        elif state.phase is Phase.PAUSED:
+            self.attention_action.setText("Resume")
         else:
-            self.protect_btn.setText("Turn protection off" if guarding else "Turn protection on")
+            self.attention_action.setText("Continue")
         can_pause = state.phase in (Phase.GUARDING, Phase.ALERTING, Phase.PROBLEM, Phase.STARTING)
         self.pause30.setEnabled(can_pause)
         self.pause_tomorrow.setEnabled(can_pause)
@@ -351,7 +408,23 @@ class HomeScreen(QWidget):
         self.coverage.setText("".join(rows))
 
     def render_last_event(self, text: str) -> None:
-        self.last_event.setText(text)
+        self.render_events([text])
+
+    def render_events(self, rows: list) -> None:
+        if not rows:
+            rows = ["No activity yet. Recent detections will appear here."]
+        for index, (label, thumb) in enumerate(zip(self.event_rows, self.event_thumbs)):
+            visible = index < len(rows)
+            item = rows[index] if visible else ""
+            text, path = item if isinstance(item, tuple) else (item, None)
+            label.setText(text)
+            label.setVisible(visible)
+            pixmap = QPixmap(path) if path else QPixmap()
+            thumb.setPixmap(pixmap.scaled(
+                thumb.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            ) if not pixmap.isNull() else QPixmap())
+            thumb.setVisible(visible and not pixmap.isNull())
 
     def _toggle(self) -> None:
         state = self._state
@@ -368,3 +441,10 @@ def _seconds_until_tomorrow() -> float:
     # 07:00 tomorrow: "until tomorrow" should end when the kitchen wakes up.
     seconds_today = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
     return max(60.0, (24 * 3600 - seconds_today) + 7 * 3600)
+
+
+def _friendly_registration_message(reason: str) -> str:
+    """Translate map-localisation internals into an actionable camera message."""
+    if "keyframe" in reason.lower():
+        return "Finish the room scan to show protection zones here."
+    return "Protection zones are temporarily unavailable in this camera view."

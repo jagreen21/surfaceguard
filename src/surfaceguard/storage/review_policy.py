@@ -41,9 +41,13 @@ REVIEW_INTERVAL_S = 7 * 86_400.0
 # Below this many worthwhile cards the review is not worth anyone's minute, and
 # offering it anyway spends the credibility needed for the week that matters.
 MIN_DECK = 6
+# The hard cap is the total: it is what the "~1 min" on the button promises, and
+# the split below is only the preferred shape of those cards. A week that is all
+# false alarms must still be reviewable — that user needs this more than anyone —
+# so alerts take any capacity the grid does not use.
+MAX_CARDS = 12
 MAX_ALERTS = 5
 MAX_GRID = 9
-MAX_CARDS = MAX_ALERTS + MAX_GRID
 # Two ignored invitations mean no. Asking a third time teaches people to dismiss
 # the card without reading it, which costs more than the labels are worth.
 MAX_DECLINES = 2
@@ -184,8 +188,18 @@ def build_deck(
             continue
         (alerts if event.fired else silent).append(candidate)
 
-    deck.alerts = _rank(cluster(alerts), MAX_ALERTS)
-    deck.grid = _rank(cluster(silent), MAX_GRID)
+    ranked_alerts = _rank(cluster(alerts))
+    ranked_grid = _rank(cluster(silent))
+    deck.alerts = ranked_alerts[:MAX_ALERTS]
+    deck.grid = ranked_grid[:min(MAX_GRID, MAX_CARDS - len(deck.alerts))]
+    spare = MAX_CARDS - deck.size
+    if spare > 0:
+        # Sounds that actually played get first claim on the spare room: they are
+        # the only events the user experienced, and the only ones with a cost.
+        deck.alerts.extend(ranked_alerts[len(deck.alerts):len(deck.alerts) + spare])
+        spare = MAX_CARDS - deck.size
+    if spare > 0:
+        deck.grid.extend(ranked_grid[len(deck.grid):len(deck.grid) + spare])
     return deck
 
 
@@ -251,14 +265,13 @@ def _cluster_key(event: Event) -> tuple:
     return (event.surface_id, night, cx, cy, event.fired)
 
 
-def _rank(candidates: list[Candidate], limit: int) -> list[Candidate]:
+def _rank(candidates: list[Candidate]) -> list[Candidate]:
     """Most informative first, with repeats counting for something."""
-    ordered = sorted(
+    return sorted(
         candidates,
         key=lambda c: (c.weight + 0.1 * min(c.count - 1, 5), c.event.ts),
         reverse=True,
     )
-    return ordered[:limit]
 
 
 # ------------------------------------------------------------------ scheduling
@@ -342,10 +355,8 @@ class Adjustment:
             t.blind_spots = [b for b in t.blind_spots
                              if not _same_spot(b, self.payload)]
         elif self.kind == "min_score":
-            self.previous = {"min_score": t.min_score}
             t.min_score = self.payload["min_score"]
         elif self.kind == "scale_tolerance":
-            self.previous = {"scale_tolerance": t.scale_tolerance}
             t.scale_tolerance = self.payload["scale_tolerance"]
         self.applied = True
 
@@ -439,11 +450,44 @@ def plan_adjustments(
     return outcome
 
 
-def _app_was_right(card: Candidate, verdict: str) -> bool:
-    if card.kind is Kind.ALERT:
+def app_was_right(fired: bool, verdict: str) -> bool | None:
+    """Was the app right, given what the user said? None when they could not say.
+
+    Note the asymmetry: a sound that should not have played and a cat that should
+    have been deterred are both wrong, but only one of them was ever visible to
+    the user before this screen existed. Counting both is the only way the score
+    means anything.
+    """
+    if verdict in ("", "unsure"):
+        return None
+    if fired:
         return verdict == "correct"
-    # It stayed silent: right unless the user says there was a cat on the surface.
     return verdict != "missed"
+
+
+def _app_was_right(card: Candidate, verdict: str) -> bool:
+    return bool(app_was_right(card.kind is Kind.ALERT, verdict))
+
+
+def weekly_accuracy(
+    events: list[Event], weeks: int = 5, now: float | None = None
+) -> list[tuple[int, int]]:
+    """(right, graded) per week, oldest first — the trend on the payoff screen."""
+    now = time.time() if now is None else now
+    buckets = [[0, 0] for _ in range(weeks)]
+    for event in events:
+        if not event.feedback:
+            continue
+        age = now - event.ts
+        index = weeks - 1 - int(age // REVIEW_INTERVAL_S)
+        if not 0 <= index < weeks:
+            continue
+        right = app_was_right(event.fired, event.feedback)
+        if right is None:
+            continue
+        buckets[index][1] += 1
+        buckets[index][0] += int(right)
+    return [(r, g) for r, g in buckets]
 
 
 def _adjust_surface(
@@ -476,7 +520,7 @@ def _adjust_surface(
         out.append(Adjustment(
             surface_id=surface.id,
             kind="blind_spot",
-            title=f"{surface.name}{when}",
+            title=f"One spot on the {surface.name.lower()}{when}",
             detail=(f"All {count} of these came from one spot. "
                     f"I'll stop calling that a cat{when}."),
             payload={
@@ -488,58 +532,89 @@ def _adjust_surface(
             event_ids=[i for c in group for i in c.ids],
         ))
 
-    # --- a missed cat the app can actually stop missing ------------------------
+    # --- missed cats, folded into one change per knob -------------------------
+    # Two cards can both point at the same dial. Emitting an adjustment for each
+    # would show the user the same sentence twice and, worse, make the second
+    # one's "undo" restore a value the first had already moved.
+    reopen: dict[tuple, Candidate] = {}
+    widen: list[Candidate] = []
+    lower: list[Candidate] = []
+    unfixable: list[Candidate] = []
+
     for card in missed:
         blocked = card.event.blocked_by
+        spot = None
         if "known_false_alarm" in blocked and card.event.map_point is not None:
             spot = surface.tuning.blind_spot_at(card.event.map_point,
                                                 card.event.minute_of_day)
-            if spot is not None:
-                out.append(Adjustment(
-                    surface_id=surface.id, kind="forget_blind_spot",
-                    title=f"I'll stop ignoring that spot on the {surface.name.lower()}",
-                    detail="You marked it as a false alarm before, and a real cat "
-                           "has now been there.",
-                    payload={"x": spot.x, "y": spot.y, "radius": spot.radius,
-                             "night_only": spot.night_only, "note": spot.note,
-                             "created": spot.created},
-                    event_ids=card.ids,
-                ))
-                continue
-        if "scale" in blocked:
-            current = surface.scale_tolerance(1.5)
-            widened = min(MAX_TOLERANCE, round(current * RELAX_FACTOR, 2))
-            if widened > current:
-                out.append(Adjustment(
-                    surface_id=surface.id, kind="scale_tolerance",
-                    title=f"I'll accept odder-looking cats on the {surface.name.lower()}",
-                    detail=f"This one was the wrong size by my reckoning. Widening "
-                           f"the size check from {current:.2f}x to {widened:.2f}x.",
-                    payload={"scale_tolerance": widened},
-                    event_ids=card.ids,
-                ))
-                continue
-        if "confidence" in blocked and surface.tuning.min_score is not None:
-            lowered = round(max(0.35, surface.tuning.min_score - 0.1), 2)
-            if lowered < surface.tuning.min_score:
-                out.append(Adjustment(
-                    surface_id=surface.id, kind="min_score",
-                    title=f"I'll act on less certainty on the {surface.name.lower()}",
-                    detail=f"Lowering the bar from {surface.tuning.min_score:.0%} "
-                           f"to {lowered:.0%}.",
-                    payload={"min_score": lowered},
-                    event_ids=card.ids,
-                ))
-                continue
-        # Nothing honest to change: the detector simply did not see a cat here.
-        # Say so rather than inventing a knob that did not move.
-        outcome.regression_cases += card.count
+        if spot is not None:
+            reopen.setdefault((spot.x, spot.y, spot.radius), card)
+        elif "scale" in blocked:
+            widen.append(card)
+        elif "confidence" in blocked and surface.tuning.min_score is not None:
+            lower.append(card)
+        else:
+            unfixable.append(card)
+
+    for (x, y, radius), card in reopen.items():
+        spot = next(b for b in surface.tuning.blind_spots
+                    if (b.x, b.y, b.radius) == (x, y, radius))
+        out.append(Adjustment(
+            surface_id=surface.id, kind="forget_blind_spot",
+            title=f"I'll stop ignoring that spot on the {surface.name.lower()}",
+            detail="You marked it as a false alarm before, and a real cat has now "
+                   "been there.",
+            payload={"x": spot.x, "y": spot.y, "radius": spot.radius,
+                     "night_only": spot.night_only, "note": spot.note,
+                     "created": spot.created},
+            event_ids=card.ids,
+        ))
+
+    if widen:
+        current = surface.scale_tolerance(1.5)
+        widened = min(MAX_TOLERANCE, round(current * RELAX_FACTOR, 2))
+        if widened > current:
+            n = sum(c.count for c in widen)
+            out.append(Adjustment(
+                surface_id=surface.id, kind="scale_tolerance",
+                title=f"I'll accept odder-looking cats on the {surface.name.lower()}",
+                detail=f"{_were(n)} the wrong size by my reckoning. Widening the "
+                       f"size check from {current:.2f}x to {widened:.2f}x.",
+                payload={"scale_tolerance": widened},
+                previous={"scale_tolerance": surface.tuning.scale_tolerance},
+                event_ids=[i for c in widen for i in c.ids],
+            ))
+        else:
+            unfixable.extend(widen)
+
+    if lower and surface.tuning.min_score is not None:
+        lowered = round(max(0.35, surface.tuning.min_score - 0.1), 2)
+        if lowered < surface.tuning.min_score:
+            out.append(Adjustment(
+                surface_id=surface.id, kind="min_score",
+                title=f"I'll act on less certainty on the {surface.name.lower()}",
+                detail=f"Lowering the bar from {surface.tuning.min_score:.0%} to "
+                       f"{lowered:.0%}.",
+                payload={"min_score": lowered},
+                previous={"min_score": surface.tuning.min_score},
+                event_ids=[i for c in lower for i in c.ids],
+            ))
+        else:
+            unfixable.extend(lower)
+
+    if unfixable:
+        # Nothing honest to change: no dial the app owns would have caught these.
+        # Say so plainly rather than inventing a knob that did not move.
+        n = sum(c.count for c in unfixable)
+        outcome.regression_cases += n
         out.append(Adjustment(
             surface_id=surface.id, kind="none",
-            title=f"One I missed on the {surface.name.lower()}",
-            detail="I can't fix this one by myself — I never saw a cat there at "
-                   "all. I've saved it as a test case.",
-            event_ids=card.ids,
+            title=f"{_count_word(n).capitalize()} I missed on the {surface.name.lower()}",
+            detail="I can't fix "
+                   + ("these" if n > 1 else "this one")
+                   + " by myself — I never saw a cat there at all. "
+                   + ("They're" if n > 1 else "It's") + " saved as test cases.",
+            event_ids=[i for c in unfixable for i in c.ids],
         ))
 
     # --- consistent agreement earns a tighter size check ----------------------
@@ -568,6 +643,10 @@ def _group_by_place(cards: list[Candidate]) -> list[list[Candidate]]:
     for card in cards:
         groups.setdefault(_cluster_key(card.event), []).append(card)
     return list(groups.values())
+
+
+def _were(n: int) -> str:
+    return "This one was" if n == 1 else f"{_count_word(n).split()[0].capitalize()} of these were"
 
 
 def _count_word(n: int) -> str:

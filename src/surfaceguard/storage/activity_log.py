@@ -171,10 +171,10 @@ class ActivityLog:
         return int(cur.lastrowid or 0)
 
     def set_feedback(self, event_id: int, feedback: str, batch: int | None = None) -> None:
-        """``feedback`` is one of :data:`VERDICTS`."""
+        """``feedback`` is one of :data:`VERDICTS`; empty clears it, for an undo."""
         self._db.execute(
             "UPDATE events SET feedback = ?, reviewed_at = ?, review_batch = ? WHERE id = ?",
-            (feedback, time.time(), batch, event_id),
+            (feedback or None, time.time() if feedback else None, batch, event_id),
         )
         self._db.commit()
 

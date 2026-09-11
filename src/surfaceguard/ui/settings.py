@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from ..bridge.credentials import get_update_token, set_update_token
 from ..update.updater import UpdateState, Updater
 from . import qtutil as Q
+from .components import PageHeader
 
 
 class _UpdateWorker(QObject):
@@ -67,12 +68,15 @@ class _Section(QFrame):
 class SettingsScreen(QWidget):
     sign_in_requested = Signal()
     launch_at_login_changed = Signal(bool)
+    system_health_requested = Signal()
 
     def __init__(self, updater: Updater) -> None:
         super().__init__()
         self.updater = updater
         self._thread: QThread | None = None
         self._worker: _UpdateWorker | None = None
+
+        header = PageHeader("Settings", "App preferences, account access, and support.")
 
         # --- camera account -------------------------------------------------
         camera = _Section(
@@ -135,10 +139,19 @@ class SettingsScreen(QWidget):
         self.launch.toggled.connect(self.launch_at_login_changed.emit)
         startup.box.addWidget(self.launch)
 
+        support = _Section(
+            "System Health",
+            "Surface Guard checks the camera, detector, room view, and sound while protection is active.",
+        )
+        health = QPushButton("View System Health")
+        health.clicked.connect(self.system_health_requested.emit)
+        support.box.addWidget(health)
+
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(13)
-        for section in (camera, updates, startup):
+        root.addWidget(header)
+        for section in (camera, startup, support, updates):
             root.addWidget(section)
         root.addStretch(1)
 

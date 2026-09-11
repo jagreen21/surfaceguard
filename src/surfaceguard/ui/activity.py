@@ -86,9 +86,13 @@ class ActivityScreen(QWidget):
         buttons.addWidget(self.correct_btn)
         buttons.addWidget(self.wrong_btn)
         side.addLayout(buttons)
-        cap = QLabel("What the checks saw")
-        cap.setObjectName("h2")
-        side.addWidget(cap)
+        self.advanced_btn = QPushButton("Show Advanced Details")
+        self.advanced_btn.setCheckable(True)
+        self.advanced_btn.toggled.connect(self._toggle_advanced)
+        side.addWidget(self.advanced_btn)
+        self.advanced_caption = QLabel("Detection checks")
+        self.advanced_caption.setObjectName("h2")
+        side.addWidget(self.advanced_caption)
         side.addWidget(self.gates, 1)
         privacy = QLabel("Privacy")
         privacy.setObjectName("h2")
@@ -114,6 +118,7 @@ class ActivityScreen(QWidget):
         root.setSpacing(14)
         root.addLayout(left, 1)
         root.addWidget(panel)
+        self._toggle_advanced(False)
         self._set_feedback_enabled(False)
 
     # ------------------------------------------------------------------ render
@@ -128,7 +133,7 @@ class ActivityScreen(QWidget):
 
     def refresh(self) -> None:
         keep_row = self.table.currentRow()
-        self._events = self.log.recent(limit=200)
+        self._events = self.log.recent(limit=200, fired_only=True)
         counts = self.log.counts()
         self.summary.setText(
             f"Last 24 hours: {counts['events']} checks, {counts['fired']} sounds played, "
@@ -154,6 +159,11 @@ class ActivityScreen(QWidget):
         if 0 <= keep_row < len(self._events):
             self.table.setCurrentCell(keep_row, 0)
         self._show_selected()
+
+    def _toggle_advanced(self, shown: bool) -> None:
+        self.advanced_btn.setText("Hide Advanced Details" if shown else "Show Advanced Details")
+        self.advanced_caption.setVisible(shown)
+        self.gates.setVisible(shown)
 
     def _selected(self) -> Event | None:
         row = self.table.currentRow()

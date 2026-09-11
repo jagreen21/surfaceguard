@@ -119,6 +119,7 @@ class StateStore:
     intent: Intent = Intent.OFF
     paused_until: float | None = None
     report: Report | None = None
+    has_camera: bool = False
     has_map: bool = False
     has_surfaces: bool = False
     alert_until: float = 0.0
@@ -157,8 +158,11 @@ class StateStore:
         self.tick()
 
         if not self.has_map or not self.has_surfaces:
-            missing = "Connect your camera to get started" if not self.has_map \
-                else "Draw the first surface you want protected"
+            if not self.has_map:
+                missing = ("Scan this room to place protection zones" if self.has_camera
+                           else "Connect your camera to get started")
+            else:
+                missing = "Draw the first surface you want protected"
             return AppState(Phase.NEEDS_SETUP, "Setup not finished", missing, Severity.WAITING)
 
         if self.intent is Intent.OFF:

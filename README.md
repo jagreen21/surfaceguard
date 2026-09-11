@@ -7,6 +7,11 @@ you have drawn — a counter, a table, a shelf — and plays a short deterrent. 
 runs from the menu bar, needs no terminal after installation, and says plainly
 when it is *not* protecting.
 
+The desktop experience is organized around Home, Rooms, Detection, Audio,
+Camera, Devices, and Settings. See the [UI audit](docs/UI_AUDIT.md) for the
+implemented visualizer mapping and the capabilities intentionally kept out of the
+interface until a real backend exists for them.
+
 The design rationale lives in the design doc. The short version of the two
 decisions that shape everything else:
 
@@ -159,6 +164,37 @@ Secrets are read through `/usr/bin/security` rather than directly, because the
 Keychain grants access per accessing binary; reading it from the app itself would
 re-prompt after every update.
 
+## The weekly review
+
+Once a week — and only when there is something worth asking about — the home
+screen offers a one-minute session where the app asks to be graded. It borrows a
+CAPTCHA's interaction (quick image judgements, batched, almost no reading) and
+inverts the power dynamic: it blocks nothing, never suspends protection, and
+quitting halfway keeps every answer already given. The user is the examiner.
+
+The deck is sampled where an answer changes a decision, not at random: alerts that
+played a sound, near-misses a gate only just blocked, and detections somewhere the
+app had never seen anything before. Repeats in the same place are clustered into
+one card, so fourteen 3 a.m. false alarms on the same shelf are one question.
+
+It is honest about what a label can do. The detection model is a frozen ONNX
+export and nothing here retrains it. What answers actually move:
+
+| What you say | What changes |
+| --- | --- |
+| Repeated false alarms in one place | a blind spot on that surface, in map coordinates, optionally after dark only |
+| "You missed one", blocked on size | that surface's size tolerance widens |
+| "You missed one" somewhere you'd marked | the blind spot is taken back off |
+| Consistent agreement on a calibrated surface | its size check tightens |
+| Anything the detector simply never saw | nothing — it says so, and keeps the case to replay |
+
+Every change is a record with the value it replaced, shown on a summary screen
+with its own undo. An adjustment that could not be named and taken back would be
+the silent failure this app exists to avoid, wearing a different hat.
+
+Sampling, clustering and the adjustments live in `storage/review_policy.py` and
+import no Qt, so they are decidable — and tested — from an activity log alone.
+
 ## Tests
 
 ```bash
@@ -196,9 +232,10 @@ src/surfaceguard/
 │   ├── manifest.py      Ed25519-signed release descriptions
 │   └── access.py        GitHub, and whether the token still works
 ├── logging_setup.py     file logging; a packaged app cannot print
-├── storage/             preferences · room map · activity log
+├── storage/             preferences · room map · activity log ·
+│                        review_policy (what the weekly review asks and changes)
 └── ui/                  onboarding · home · surface editor · activity ·
-                         diagnostics · settings · connect
+                         diagnostics · settings · connect · review
 tools/phase0.py          feasibility harness
 packaging/               fetch_runtime · build_app · make_release
 runtime/                 bundled Node + Eufy bridge (not in git)

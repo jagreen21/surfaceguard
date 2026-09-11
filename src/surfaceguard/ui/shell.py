@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .components import NavButton
+from .components import BrandMark, NavButton
 
 
 DESTINATIONS = (
@@ -47,8 +47,14 @@ class AppShell(QWidget):
         nav.setContentsMargins(12, 16, 12, 14)
         nav.setSpacing(5)
 
-        self.brand_mark = QLabel("◒")
-        self.brand_mark.setObjectName("brandMark")
+        self.traffic = QLabel("<span style='color:#ff605c'>●</span>  "
+                              "<span style='color:#ffbd44'>●</span>  "
+                              "<span style='color:#00ca4e'>●</span>")
+        self.traffic.setTextFormat(Qt.TextFormat.RichText)
+        nav.addWidget(self.traffic)
+        nav.addSpacing(9)
+
+        self.brand_mark = BrandMark()
         self.brand_name = QLabel("Surface Guard")
         self.brand_name.setObjectName("brandName")
         brand = QHBoxLayout()
@@ -57,7 +63,7 @@ class AppShell(QWidget):
         brand.addWidget(self.brand_name)
         brand.addStretch(1)
         nav.addLayout(brand)
-        nav.addSpacing(18)
+        nav.addSpacing(14)
 
         for index, (symbol, name) in enumerate(DESTINATIONS):
             button = NavButton(symbol, name)
@@ -69,10 +75,26 @@ class AppShell(QWidget):
             nav.addWidget(button)
         nav.addStretch(1)
 
+        self.status_panel = QFrame()
+        self.status_panel.setObjectName("sideStatus")
+        status_box = QVBoxLayout(self.status_panel)
+        status_box.setContentsMargins(8, 8, 8, 8)
+        status_box.setSpacing(2)
         self.health_button = QPushButton("●  Checking systems…")
         self.health_button.setObjectName("healthButton")
         self.health_button.clicked.connect(self.health_requested.emit)
-        nav.addWidget(self.health_button)
+        self._health_text = "Checking systems…"
+        self._health_tone = "neutral"
+        self._compact = False
+        status_box.addWidget(self.health_button)
+        self.device_labels: list[QLabel] = []
+        for _ in range(4):
+            label = QLabel("")
+            label.setObjectName("sideDevice")
+            label.setVisible(False)
+            self.device_labels.append(label)
+            status_box.addWidget(label)
+        nav.addWidget(self.status_panel)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -96,20 +118,37 @@ class AppShell(QWidget):
         self.page_changed.emit(name)
 
     def set_health(self, text: str, tone: str) -> None:
-        self.health_button.setText(f"●  {text}")
+        self._health_text = text
+        self._health_tone = tone
+        self.health_button.setText("●" if self._compact else f"●  {text}")
         self.health_button.setProperty("tone", tone)
         self.health_button.style().unpolish(self.health_button)
         self.health_button.style().polish(self.health_button)
 
+    def set_inventory(self, devices: list) -> None:
+        """Show the real device inventory in the compact sidebar status card."""
+        for label, device in zip(self.device_labels, devices[:4]):
+            status = "Online" if device.online else "Offline"
+            if device.battery_percent is not None:
+                status = f"{device.battery_percent}%"
+            label.setText(f"  ◉  {device.name}    {status}")
+            label.setVisible(not self._compact)
+        for label in self.device_labels[len(devices[:4]):]:
+            label.setText("")
+            label.setVisible(False)
+
     def adapt_to_width(self, width: int) -> None:
         compact = width < 900
         target = 72 if compact else 210
-        if self.sidebar.width() == target:
+        if self._compact == compact and self.sidebar.width() == target:
             return
+        self._compact = compact
         self.sidebar.setFixedWidth(target)
         self.brand_name.setVisible(not compact)
+        self.traffic.setVisible(not compact)
         for button in self.buttons.values():
             button.set_compact(compact)
-        self.health_button.setText("●" if compact else self.health_button.text())
-        self.health_button.setToolTip("System Health")
-
+        for label in self.device_labels:
+            label.setVisible(not compact and bool(label.text()))
+        self.health_button.setText("●" if compact else f"●  {self._health_text}")
+        self.health_button.setToolTip(f"System Health: {self._health_text}")
