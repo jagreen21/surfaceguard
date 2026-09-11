@@ -98,11 +98,22 @@ def signing_identity() -> tuple[str, str]:
     return "-", "ad-hoc"
 
 
-def build_installer_app(staging: Path, token: str, version: str) -> Path:
-    """A signed .app around the shell script, because a loose script cannot be signed."""
+def build_installer_app(staging: Path, app: Path, token: str, version: str) -> Path:
+    """A signed .app holding both the script and Surface Guard itself.
+
+    Surface Guard goes *inside* rather than beside. macOS App Translocation runs a
+    quarantined app from a randomised read-only copy, so a sibling that is plainly
+    next to it in Finder is not next to it at runtime — which is exactly how the
+    first version failed. Anything inside the bundle travels with it.
+    """
     bundle = staging / "Install Surface Guard.app"
     macos = bundle / "Contents" / "MacOS"
+    resources = bundle / "Contents" / "Resources"
     macos.mkdir(parents=True)
+    resources.mkdir(parents=True)
+
+    print("  placing Surface Guard inside the installer")
+    subprocess.run(["/usr/bin/ditto", str(app), str(resources / app.name)], check=True)
 
     script = SCRIPT.replace(
         "__TOKEN_BLOCK__",
@@ -133,10 +144,7 @@ def build(app: Path, token: str, out: Path, version: str) -> Path:
     staging = Path(tempfile.mkdtemp(prefix="sg-installer-")) / APP_NAME
     staging.mkdir(parents=True)
 
-    print("  copying the app")
-    subprocess.run(["/usr/bin/ditto", str(app), str(staging / app.name)], check=True)
-
-    build_installer_app(staging, token, version)
+    build_installer_app(staging, app, token, version)
     (staging / "Read me first.txt").write_text(READ_ME)
 
     out.unlink(missing_ok=True)

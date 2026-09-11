@@ -17,13 +17,24 @@ DEST="$HOME/Applications"
 AGENT="$HOME/Library/LaunchAgents/com.surfaceguard.app.plist"
 LOG="/tmp/surfaceguard-install.log"
 
-# $0 is .../Install Surface Guard.app/Contents/MacOS/install — the delivered
-# folder is three levels up.
-HERE="$(cd "$(dirname "$0")/../../.." && pwd)"
-SRC="$HERE/$APP"
+# Surface Guard.app lives *inside* this installer, not beside it.
+#
+# Looking for a sibling does not work: macOS App Translocation runs a quarantined
+# app from a randomised read-only copy, so what it sees as its own folder contains
+# only itself — the file that is plainly next to it in Finder is not next to it at
+# runtime. Anything shipped inside the bundle is copied along with it, so this path
+# is always right.
+RESOURCES="$(cd "$(dirname "$0")/../Resources" && pwd)"
+SRC="$RESOURCES/$APP"
+
+# Fall back to a sibling anyway, for a build laid out the old way.
+if [ ! -d "$SRC" ]; then
+  BESIDE="$(cd "$(dirname "$0")/../../.." && pwd 2>/dev/null || echo /nonexistent)"
+  [ -d "$BESIDE/$APP" ] && SRC="$BESIDE/$APP"
+fi
 
 exec 2>>"$LOG"
-echo "--- $(date) installing from $HERE" >>"$LOG"
+echo "--- $(date) installer starting, argv0=$0" >>"$LOG"
 
 say() {
   osascript -e "display dialog \"$1\" buttons {\"OK\"} default button 1 with title \"$TITLE\"" >/dev/null 2>&1
@@ -34,7 +45,8 @@ fail() {
 }
 
 if [ ! -d "$SRC" ]; then
-  fail "Could not find $APP next to this installer.\n\nKeep both together and try again."
+  echo "looked in: $SRC" >>"$LOG"
+  fail "This installer is damaged — Surface Guard is missing from inside it.\n\nDownload it again."
 fi
 
 ANSWER=$(osascript -e "display dialog \"This will install Surface Guard into your Applications folder and open it.\n\nIt takes a few seconds.\" buttons {\"Cancel\",\"Install\"} default button \"Install\" with title \"$TITLE\"" 2>/dev/null) || exit 0
