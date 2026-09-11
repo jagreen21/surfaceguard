@@ -9,6 +9,7 @@ tested with no model and no hardware.
 
 from __future__ import annotations
 
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,24 @@ from ..geometry.projection import Box
 # COCO indices for the only two classes this app cares about.
 COCO_CAT = 15
 COCO_PERSON = 0
+
+MODEL_FILENAME = "yolov8n.onnx"
+
+
+def bundled_model_path() -> Path | None:
+    """Find the detection model without anyone having to configure a path.
+
+    Inside the .app it sits in Resources; in a checkout it sits in models/. She
+    should never have to know either of those things.
+    """
+    candidates = []
+    frozen = getattr(sys, "_MEIPASS", None)
+    if frozen:
+        candidates += [Path(frozen) / "models" / MODEL_FILENAME,
+                       Path(sys.executable).resolve().parent.parent / "Resources"
+                       / "models" / MODEL_FILENAME]
+    candidates.append(Path(__file__).resolve().parents[3] / "models" / MODEL_FILENAME)
+    return next((p for p in candidates if p.exists()), None)
 
 
 @dataclass
@@ -195,16 +214,24 @@ class SyntheticDetector(Detector):
 
 
 def load_detector(model_path: str | Path | None = None, camera=None) -> Detector:
-    """Pick a backend: the real model where there is one, otherwise ground truth.
+    """Pick a backend.
 
-    Raises if a model path is given but unusable, rather than silently falling
-    back to the test backend and reporting confidence it does not have.
+    Order matters. An explicitly configured model always wins. Otherwise a
+    synthetic camera gets the synthetic detector — the real model would look at a
+    drawn cartoon cat and correctly see nothing, which makes the demo useless for
+    showing what a trigger looks like. Only then does the bundled model apply.
+
+    Raises rather than silently degrading: a detector that cannot detect must be
+    an error the heartbeat can report, not a quiet fallback.
     """
     if model_path is not None:
         return OnnxDetector(model_path)
-    if camera is None or not hasattr(camera, "ground_truth_boxes"):
-        raise RuntimeError(
-            "No detection model configured and no synthetic camera to fall back on. "
-            "Set a model path (a YOLOv8 ONNX export) in preferences."
-        )
-    return SyntheticDetector(camera)
+    if camera is not None and hasattr(camera, "ground_truth_boxes"):
+        return SyntheticDetector(camera)
+    bundled = bundled_model_path()
+    if bundled is not None:
+        return OnnxDetector(bundled)
+    raise RuntimeError(
+        "No detection model is installed, so nothing can be detected. "
+        f"Expected {MODEL_FILENAME} alongside the app."
+    )

@@ -340,3 +340,31 @@ def test_a_release_with_no_manifest_is_refused(tmp_path, monkeypatch, keypair):
     status = updater.check()
     assert status.state is UpdateState.FAILED
     assert "signed manifest" in status.message
+
+
+def test_a_missing_detector_stops_the_app_claiming_to_protect():
+    """The silent-blindness case: video, registration and audio all fine, but the
+    detector can never return anything. Every other check passes, so this one has
+    to fail or the app lies about protecting (D4)."""
+    store = StateStore(has_map=True, has_surfaces=True)
+    store.arm()
+    metrics = Metrics(last_frame_at=time.time(), frames=500, inference_ms=0.0,
+                      inliers=180, registered=True, fps=8.0)
+    import time as _t
+    metrics.last_frame_at = _t.monotonic()
+    store.report = run_checks(
+        metrics, audio_ok=True, bridge=BridgeStatus(running=True, listening=True),
+        detector_available=False,
+        detector_note="No detection model installed — nothing will be detected.",
+    )
+    assert not store.report.ok
+    assert store.state().phase is Phase.PROBLEM
+    assert "detect" in store.state().detail.lower()
+    assert store.state().remedy
+
+    # And with a working detector the same metrics are healthy.
+    store.report = run_checks(
+        metrics, audio_ok=True, bridge=BridgeStatus(running=True, listening=True),
+        detector_available=True,
+    )
+    assert store.report.ok and store.state().phase is Phase.GUARDING

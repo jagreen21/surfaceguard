@@ -84,6 +84,8 @@ def run_checks(
     min_inliers: int = 30,
     surfaces_total: int = 0,
     surfaces_covered: int = 0,
+    detector_available: bool = True,
+    detector_note: str = "",
     bridge=None,
     update_token=None,
     now: float | None = None,
@@ -103,13 +105,25 @@ def run_checks(
         remedy="Check the camera is powered on and on the same network.",
     ))
 
-    checks.append(Check(
-        "detector",
-        metrics.frames > 0 and metrics.inference_ms <= MAX_INFERENCE_MS,
-        "Looking for cats" if metrics.frames > 0 and metrics.inference_ms <= MAX_INFERENCE_MS
-        else f"Detection is too slow ({metrics.inference_ms:.0f} ms per frame)",
-        remedy="Close other heavy apps, or lower the frame rate in Settings.",
-    ))
+    if not detector_available:
+        # A detector that cannot run is worse than a slow one: it never returns
+        # anything, so every other check passes and the app looks healthy while
+        # being completely blind. This must fail loudly (D4).
+        checks.append(Check(
+            "detector",
+            False,
+            detector_note or "No cat detector is installed, so nothing can be detected",
+            remedy="Install a detection model — see Settings.",
+        ))
+    else:
+        fast_enough = metrics.frames > 0 and metrics.inference_ms <= MAX_INFERENCE_MS
+        checks.append(Check(
+            "detector",
+            fast_enough,
+            "Looking for cats" if fast_enough
+            else f"Detection is too slow ({metrics.inference_ms:.0f} ms per frame)",
+            remedy="Close other heavy apps, or lower the frame rate in Settings.",
+        ))
 
     checks.append(Check(
         "audio",

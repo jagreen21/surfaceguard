@@ -9,3 +9,5 @@ runtime/
 dist/
 build/
 *.spec
+models/*.onnx
+tests/assets/

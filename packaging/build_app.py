@@ -121,6 +121,12 @@ def build(args) -> Path:
         raise SystemExit(
             "runtime/ is missing. Run: python packaging/fetch_runtime.py"
         )
+    model = ROOT / "models" / "yolov8n.onnx"
+    if args.with_onnx and not model.exists():
+        raise SystemExit(
+            f"--with-onnx needs a detection model at {model}. "
+            "See README: export one with packaging/export_model.py"
+        )
     for path in (DIST, BUILD):
         shutil.rmtree(path, ignore_errors=True)
 
@@ -134,6 +140,7 @@ def build(args) -> Path:
             "--paths", str(SRC),
             # The whole Node + bridge runtime rides along inside Resources.
             "--add-data", f"{RUNTIME}:runtime",
+            "--add-data", f"{ROOT / 'models'}:models",
             "--collect-submodules", "surfaceguard",
             "--hidden-import", "surfaceguard.app",
             "--collect-binaries", "av",

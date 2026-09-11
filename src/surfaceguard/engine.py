@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -33,6 +34,24 @@ logger = get_logger("engine")
 
 HEARTBEAT_EVERY_S = 20.0
 SCAN_REPLAN_EVERY_S = 30.0
+
+# --- evidence for the weekly review -------------------------------------------
+# Near-misses are logged every frame a cat is near a surface, so keeping a picture
+# for each one would write hundreds of near-identical stills during a single
+# visit. One picture per surface per window is plenty: the review clusters
+# repeats into a single question anyway, and it only needs one good look.
+CANDIDATE_PICTURE_EVERY_S = 30.0
+
+# Which blocked gates are worth photographing. "visible" is deliberately absent:
+# a surface half out of frame is a real problem, but not one a label can fix, and
+# the review would rather spend a card on something the user's answer can change.
+REVIEWABLE_GATES = frozenset({"scale", "known_false_alarm", "confidence", "no_person"})
+
+# Frames kept in the ring buffer, and how many of them a strip uses. At the
+# default 8 fps this reaches about two seconds back, which is enough motion to
+# settle most of the calls the review picks precisely because they are hard.
+STRIP_BUFFER = 16
+STRIP_FRAMES = 5
 
 
 @dataclass
@@ -92,6 +111,8 @@ class Engine:
         self._last_heartbeat = 0.0
         self._last_replan = 0.0
         self._missed_pet_events = 0
+        self._recent_frames: deque = deque(maxlen=STRIP_BUFFER)
+        self._last_candidate_picture: dict[str, float] = {}
 
         if room_map is not None:
             self.set_room_map(room_map)
@@ -160,6 +181,7 @@ class Engine:
 
         self.metrics.last_frame_at = frame.ts_received
         self.metrics.frames += 1
+        self._remember_frame(frame)
         if self.metrics.fps == 0.0:
             self.metrics.fps = self.prefs.target_fps
         result = FrameResult(frame=frame, pose=None)
@@ -205,7 +227,7 @@ class Engine:
         for surface in surfaces_for_pose(self.prefs.surfaces, pose):
             best: Verdict | None = None
             for cat in result.cats:
-                verdict = evaluate(surface, pose, cat, result.people)
+                verdict = evaluate(surface, pose, cat, result.people, minute)
                 if best is None or (verdict.on_surface and not best.on_surface):
                     best = verdict
                 if verdict.on_surface:
@@ -221,7 +243,7 @@ class Engine:
             elif best is not None and not best.on_surface and best.blocked_by != ["inside"]:
                 # Near-misses are worth logging, but "the cat was somewhere else"
                 # is not a near-miss and would bury the log.
-                self._record(surface, decision, result, fired=False)
+                self._record(surface, decision, result, fired=False, now=now)
 
     def _fire(self, surface, decision: Decision, result: FrameResult) -> None:
         delay = surface.deterrent.delay_s
@@ -251,7 +273,8 @@ class Engine:
             surface.observe_height(result.pose, decision.verdict.box)
 
         self.state.note_alert()
-        self._record(surface, decision, result, fired=played, latency_ms=latency_ms, via=via)
+        self._record(surface, decision, result, fired=played, latency_ms=latency_ms,
+                     via=via, now=time.monotonic())
         if self.on_trigger:
             self.on_trigger(decision, result)
 
@@ -270,6 +293,7 @@ class Engine:
         fired: bool,
         latency_ms: float | None = None,
         via: str = "",
+        now: float | None = None,
     ) -> None:
         if self.log is None:
             return
@@ -280,14 +304,65 @@ class Engine:
         ]
         box = verdict.box if verdict else None
         reason = decision.reason if not fired else f"deterrent played via {via}"
+
+        # Where this happened in the room, not in this frame. It is what lets the
+        # review ask "this same spot again?" after the camera has panned away and
+        # come back, and what a blind spot is anchored to (D1).
+        map_point = None
+        if box is not None and result.pose is not None:
+            try:
+                map_point = surface.paw_in_map(result.pose, box.paw_point)
+            except Exception:  # a degenerate pose must not lose the event itself
+                map_point = None
+
+        keep = self._wants_picture(surface, verdict, fired, now)
+        allowed = self.prefs.save_thumbnails or self.prefs.review_pictures_only
         self.log.record(
             surface.id, surface.name, fired, reason, gates,
             score=box.score if box else None,
             box=(box.x1, box.y1, box.x2, box.y2) if box else None,
             latency_ms=latency_ms,
-            frame=result.frame.image if fired else None,
-            save_thumbnail=self.prefs.save_thumbnails,
+            frame=result.frame.image if keep else None,
+            save_thumbnail=allowed,
+            map_point=map_point,
+            strip_frames=self._strip_frames() if keep else None,
         )
+
+    def _wants_picture(self, surface, verdict, fired: bool, now: float | None) -> bool:
+        """Is this event one the weekly review might want to show?
+
+        Everything that played a sound, plus a rate-limited sample of the silent
+        calls that a label could actually change.
+        """
+        if fired:
+            return True
+        if verdict is None:
+            return False
+        interesting = REVIEWABLE_GATES.intersection(verdict.blocked_by) or verdict.degraded
+        if not interesting:
+            return False
+        now = time.monotonic() if now is None else now
+        last = self._last_candidate_picture.get(surface.id, -1e9)
+        if now - last < CANDIDATE_PICTURE_EVERY_S:
+            return False
+        self._last_candidate_picture[surface.id] = now
+        return True
+
+    def _remember_frame(self, frame: Frame) -> None:
+        image = frame.image
+        if image is None or image.size == 0:
+            return
+        self._recent_frames.append(image.copy())
+
+    def _strip_frames(self) -> list:
+        """A handful of frames spread across the buffer, ending at the newest."""
+        buffered = list(self._recent_frames)
+        if not buffered:
+            return []
+        if len(buffered) <= STRIP_FRAMES:
+            return buffered
+        step = (len(buffered) - 1) / (STRIP_FRAMES - 1)
+        return [buffered[round(i * step)] for i in range(STRIP_FRAMES)]
 
     # ------------------------------------------------------------------ scan
 
@@ -323,6 +398,7 @@ class Engine:
             return
         self._last_heartbeat = now
         audio = self.player.self_test()
+        info = self.detector.info
         plan = self.build_plan()
         coverage = plan.coverage()
         enabled = [s for s in self.prefs.surfaces if s.enabled]
@@ -334,6 +410,8 @@ class Engine:
             min_inliers=self.registrar.min_inliers,
             surfaces_total=len(enabled),
             surfaces_covered=covered,
+            detector_available=info.available,
+            detector_note=info.note,
             bridge=self.bridge.status if self.bridge is not None else None,
             update_token=self.updater.status.token if self.updater is not None else None,
             now=now,
