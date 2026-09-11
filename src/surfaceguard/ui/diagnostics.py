@@ -6,8 +6,13 @@ live here, so "is it actually working?" has an answer beyond the headline.
 
 from __future__ import annotations
 
+import platform
+import subprocess
+import time
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -19,6 +24,8 @@ from PySide6.QtWidgets import (
 
 from ..engine import Engine
 from ..health.heartbeat import Report
+from ..logging_setup import log_dir, tail
+from ..update import build_info
 from . import qtutil as Q
 
 TARGET_P95_MS = 1200.0
@@ -87,6 +94,20 @@ class DiagnosticsScreen(QWidget):
         rescan = QPushButton("Scan the room again")
         rescan.clicked.connect(self.rescan_requested.emit)
 
+        # She will be the one in the room when this breaks, and he will not.
+        # These two buttons are how a problem travels from her Mac to him.
+        copy_btn = QPushButton("Copy diagnostics")
+        copy_btn.clicked.connect(self._copy_diagnostics)
+        logs_btn = QPushButton("Show log files")
+        logs_btn.clicked.connect(self._reveal_logs)
+        self.support_note = QLabel("")
+        self.support_note.setObjectName("dim")
+        self.support_note.setWordWrap(True)
+        support_row = QHBoxLayout()
+        support_row.addWidget(copy_btn)
+        support_row.addWidget(logs_btn)
+        support_row.addStretch(1)
+
         checks_panel = QFrame()
         checks_panel.setObjectName("panel")
         cbox = QVBoxLayout(checks_panel)
@@ -105,6 +126,8 @@ class DiagnosticsScreen(QWidget):
         mbox.addWidget(cap2)
         mbox.addWidget(self.camera, 1)
         mbox.addWidget(rescan)
+        mbox.addLayout(support_row)
+        mbox.addWidget(self.support_note)
 
         panels = QHBoxLayout()
         panels.setSpacing(12)
@@ -143,6 +166,66 @@ class DiagnosticsScreen(QWidget):
         for note in caps.notes:
             lines.append(f"{'note':26s} {note}")
         self.camera.setText("\n".join(lines))
+
+    # ------------------------------------------------------------------ support
+
+    def diagnostics_text(self) -> str:
+        """One pasteable block: everything needed to debug this from somewhere else."""
+        m = self.engine.metrics
+        caps = self.engine.source.capabilities
+        info = self.engine.detector.info
+        report = self.engine.last_report
+        lines = [
+            f"Surface Guard {build_info.VERSION} ({build_info.UPDATE_CHANNEL})",
+            f"macOS {platform.mac_ver()[0]} on {platform.machine()}",
+            f"time: {time.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+            "",
+            f"state      : {self.engine.state.state().headline} — "
+            f"{self.engine.state.state().detail}",
+            f"camera     : {caps.name} ({caps.model}) ptz={caps.has_ptz} "
+            f"angles={caps.reports_angles} speaker={caps.has_speaker}",
+            f"detector   : {info.name} / {info.backend}",
+            f"frames     : {m.frames}  fps {m.fps:.1f}  inference {m.inference_ms:.0f} ms",
+            f"registered : {m.registered}  inliers {m.inliers}  "
+            f"registration {m.registration_ms:.1f} ms",
+            f"latency p95: {m.p95_latency_ms() or float('nan'):.0f} ms",
+            f"surfaces   : {len(self.engine.prefs.surfaces)}  "
+            f"missed pet events: {self.engine.missed_pet_events}",
+        ]
+        if self.engine.bridge is not None:
+            st = self.engine.bridge.status
+            lines.append(
+                f"bridge     : running={st.running} listening={st.listening} "
+                f"port={st.port} restarts={st.restarts} {st.fatal or st.message}"
+            )
+        if self.engine.updater is not None:
+            us = self.engine.updater.status
+            lines.append(f"updates    : {us.state.value} — {us.message}")
+            lines.append(f"update auth: {us.token.summary()}")
+        if report is not None:
+            lines.append("")
+            lines.append("self-check:")
+            lines += [
+                f"  {'ok  ' if c.ok else ('FAIL' if c.required else 'warn')}  {c.detail}"
+                for c in report.checks
+            ]
+        if self.engine.bridge is not None:
+            recent = self.engine.bridge.logs(12)
+            if recent:
+                lines += ["", "camera service (last lines):"]
+                lines += [f"  {line[:180]}" for line in recent]
+        lines += ["", "app log (last lines):", tail(40)]
+        return "\n".join(lines)
+
+    def _copy_diagnostics(self) -> None:
+        QApplication.clipboard().setText(self.diagnostics_text())
+        self.support_note.setText(
+            "Copied. Paste it into a message — it has no passwords or tokens in it."
+        )
+
+    def _reveal_logs(self) -> None:
+        subprocess.run(["/usr/bin/open", str(log_dir())], check=False)
+        self.support_note.setText(f"Logs are in {log_dir()}")
 
     def _render_report(self, report: Report | None) -> None:
         if report is None:

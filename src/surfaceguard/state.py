@@ -39,6 +39,63 @@ class Phase(enum.Enum):
     PROBLEM = "problem"
 
 
+class DeviceKind(enum.Enum):
+    MAIN_UNIT = "main_unit"
+    CAMERA = "camera"
+    SPEAKER = "speaker"
+
+
+@dataclass(frozen=True)
+class DeviceCapabilities:
+    """Consumer-visible capabilities; absent hardware produces absent UI."""
+
+    camera: bool = False
+    microphone: bool = False
+    speaker: bool = False
+    battery: bool = False
+    charging: bool = False
+    stereo_pairing: bool = False
+    magnetic_docking: bool = False
+
+
+@dataclass(frozen=True)
+class DeviceViewState:
+    id: str
+    name: str
+    kind: DeviceKind
+    room_id: str | None = None
+    online: bool = False
+    battery_percent: int | None = None
+    charging: bool = False
+    detail: str = ""
+    capabilities: DeviceCapabilities = field(default_factory=DeviceCapabilities)
+
+
+@dataclass(frozen=True)
+class RoomViewState:
+    id: str
+    name: str
+    camera_ids: tuple[str, ...] = ()
+    speaker_ids: tuple[str, ...] = ()
+    surface_ids: tuple[str, ...] = ()
+    protection: str = "idle"
+
+
+@dataclass(frozen=True)
+class ProductViewState:
+    """Collection-driven state consumed by the application shell.
+
+    The current backend supplies one room and one camera, but the UI contract is
+    deliberately plural so additional hardware does not require another shell.
+    """
+
+    rooms: tuple[RoomViewState, ...] = ()
+    devices: tuple[DeviceViewState, ...] = ()
+    selected_room_id: str | None = None
+    selected_camera_id: str | None = None
+    system_health: str = "checking"
+
+
 @dataclass(frozen=True)
 class AppState:
     """Everything the home screen needs, already in the user's words."""

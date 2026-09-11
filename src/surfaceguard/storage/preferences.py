@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..geometry.surface import Deterrent, ScheduleWindow, Surface
+from ..geometry.surface import BlindSpot, Deterrent, ScheduleWindow, Surface, Tuning
 
 APP_NAME = "SurfaceGuard"
 
@@ -53,6 +53,24 @@ class Preferences:
     master_volume: float = 0.6
     scan_weights: dict[str, float] = field(default_factory=dict)
     camera: dict = field(default_factory=dict)
+    room_name: str = "Kitchen"
+    detection_sensitivity: str = "Balanced"
+    custom_sounds: dict[str, str] = field(default_factory=dict)
+    show_protected_zones: bool = True
+    show_detection_boxes: bool = True
+    show_surface_labels: bool = True
+
+    # --- weekly review ------------------------------------------------------
+    # ``review_enabled`` is the user's standing answer to "ask me to grade you".
+    # ``review_declines`` counts consecutive "not now"s so the invitation can
+    # stop asking on its own rather than becoming something to dismiss by reflex.
+    review_enabled: bool = True
+    last_review_at: float = 0.0
+    last_review_offered_at: float = 0.0
+    review_declines: int = 0
+    # Keep pictures for the review even when the user has turned pictures off
+    # everywhere else; they are deleted the moment the review is finished.
+    review_pictures_only: bool = False
 
     # --------------------------------------------------------------- load/save
 
@@ -103,6 +121,7 @@ def surface_to_dict(s: Surface) -> dict:
         "height_samples": [round(v, 4) for v in s.height_samples],
         "deterrent": asdict(s.deterrent),
         "schedule": asdict(s.schedule),
+        "tuning": asdict(s.tuning),
     }
 
 
@@ -119,4 +138,15 @@ def surface_from_dict(d: dict) -> Surface:
         height_samples=[float(v) for v in (d.get("height_samples") or [])],
         deterrent=Deterrent(**(d.get("deterrent") or {})),
         schedule=ScheduleWindow(**sched) if sched else ScheduleWindow(),
+        tuning=_tuning_from_dict(d.get("tuning")),
+    )
+
+
+def _tuning_from_dict(d: dict | None) -> Tuning:
+    d = d or {}
+    return Tuning(
+        blind_spots=[BlindSpot(**b) for b in (d.get("blind_spots") or [])],
+        min_score=None if d.get("min_score") is None else float(d["min_score"]),
+        scale_tolerance=(None if d.get("scale_tolerance") is None
+                         else float(d["scale_tolerance"])),
     )

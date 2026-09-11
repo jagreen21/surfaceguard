@@ -84,6 +84,8 @@ def run_checks(
     min_inliers: int = 30,
     surfaces_total: int = 0,
     surfaces_covered: int = 0,
+    bridge=None,
+    update_token=None,
     now: float | None = None,
 ) -> Report:
     """Assemble one heartbeat report from the engine's current metrics."""
@@ -123,6 +125,30 @@ def run_checks(
         else "Camera view has moved",
         remedy="Point the camera back at the room, or re-scan the room in Settings.",
     ))
+
+    if bridge is not None and not bridge.healthy:
+        checks.append(Check(
+            "camera_service",
+            False,
+            bridge.fatal or "The camera service is not running",
+            remedy=(
+                "Sign in to the camera account again in Settings."
+                if bridge.fatal else "It is restarting on its own; this usually clears."
+            ),
+        ))
+
+    if update_token is not None and (not update_token.ok or update_token.expiring_soon):
+        # Advisory: updates failing does not stop the app guarding. But it must be
+        # visible, because a token that lapses in silence means she simply stops
+        # receiving fixes and nothing ever says so.
+        checks.append(Check(
+            "updates",
+            False,
+            update_token.summary(),
+            required=False,
+            remedy=update_token.remedy or
+            "Create a new access token on GitHub and paste it into Settings.",
+        ))
 
     if surfaces_total:
         covered = surfaces_covered >= surfaces_total

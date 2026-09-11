@@ -90,8 +90,15 @@ def evaluate(
     pose: Pose,
     cat: Box,
     people: list[Box] | None = None,
+    minute_of_day: int | None = None,
 ) -> Verdict:
-    """Run every stateless gate for one cat box against one surface."""
+    """Run every stateless gate for one cat box against one surface.
+
+    ``minute_of_day`` is only needed by the adjustments the weekly review makes —
+    a blind spot can be limited to after dark. Leave it None and those gates
+    behave as if the spot applied all day, which is the safe direction for a
+    caller that does not know the time.
+    """
     verdict = Verdict(surface.id, surface.name, box=cat)
     add = verdict.gates.append
     poly = surface.project(pose)
@@ -124,7 +131,8 @@ def evaluate(
         ))
     else:
         ratio = cat.height / expected
-        ok = (1.0 / SCALE_TOLERANCE) <= ratio <= SCALE_TOLERANCE
+        tol = surface.scale_tolerance(SCALE_TOLERANCE)
+        ok = (1.0 / tol) <= ratio <= tol
         add(GateResult(
             "scale",
             Status.PASS if ok else Status.FAIL,
@@ -139,6 +147,26 @@ def evaluate(
         Status.FAIL if near else Status.PASS,
         "someone is at the surface" if near else "no person nearby",
     ))
+
+    # --- adjustments the weekly review made -------------------------------
+    # These gates exist only once the user has tuned this surface, so the gate
+    # list stays a record of what the app decided, not a list of inactive knobs.
+    tuning = surface.tuning
+    if tuning.min_score is not None:
+        add(GateResult(
+            "confidence",
+            Status.PASS if cat.score >= tuning.min_score else Status.FAIL,
+            f"{cat.score:.0%} sure, and you asked for {tuning.min_score:.0%} here",
+        ))
+
+    if tuning.blind_spots and inside:
+        spot = tuning.blind_spot_at(surface.paw_in_map(pose, paw), minute_of_day)
+        add(GateResult(
+            "known_false_alarm",
+            Status.FAIL if spot is not None else Status.PASS,
+            f"this is {spot.describe()}" if spot is not None
+            else "not one of the spots you marked",
+        ))
 
     # --- occlusion warning ------------------------------------------------
     # A box whose bottom is flush with the frame edge is clipped, so its paw point

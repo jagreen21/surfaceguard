@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 import plistlib
 import subprocess
 import sys
@@ -32,6 +33,9 @@ if __package__ in (None, ""):  # allow `python src/surfaceguard/app.py`
     __package__ = "surfaceguard"
 
 from .audio.player import Player
+from .bridge.credentials import EufyAccount
+from .logging_setup import get as get_logger, log_dir, setup as setup_logging
+from .bridge.supervisor import BridgeSupervisor
 from .camera.sources.base import CameraSource, SourceError
 from .detection.cat_detector import Detector, SyntheticDetector, load_detector
 from .engine import Engine, FrameResult
@@ -42,10 +46,16 @@ from .storage.preferences import Preferences, support_dir
 from .storage.room_map import load_room_map, save_room_map
 from .ui import qtutil as Q
 from .ui.activity import ActivityScreen
+from .ui.connect import EufySignInDialog
 from .ui.diagnostics import DiagnosticsScreen
 from .ui.home import HomeScreen
 from .ui.onboarding import OnboardingDialog, _build_source
+from .ui.settings import SettingsScreen
 from .ui.surface_editor import SurfaceEditor
+from .update import build_info
+from .update.updater import Updater, cleanup_previous
+
+logger = get_logger("app")
 
 LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / "com.surfaceguard.app.plist"
 UI_REFRESH_MS = 120
@@ -61,11 +71,22 @@ class _Bridge(QObject):
 
 
 class MainWindow(QWidget):
-    def __init__(self, engine: Engine, prefs: Preferences, log: ActivityLog) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        prefs: Preferences,
+        log: ActivityLog,
+        updater: Updater | None = None,
+        supervisor: BridgeSupervisor | None = None,
+    ) -> None:
         super().__init__()
         self.engine = engine
         self.prefs = prefs
         self.log = log
+        self.updater = updater or Updater()
+        self.supervisor = supervisor
+        engine.updater = self.updater
+        engine.bridge = supervisor
         self._quitting = False
         self._caffeinate: subprocess.Popen | None = None
 
@@ -76,12 +97,14 @@ class MainWindow(QWidget):
         self.editor = SurfaceEditor()
         self.activity = ActivityScreen(log)
         self.diagnostics = DiagnosticsScreen(engine)
+        self.settings = SettingsScreen(self.updater)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.home, "Home")
         self.tabs.addTab(self.editor, "Surfaces")
         self.tabs.addTab(self.activity, "Activity")
         self.tabs.addTab(self.diagnostics, "Diagnostics")
+        self.tabs.addTab(self.settings, "Settings")
         self.tabs.currentChanged.connect(self._on_tab)
 
         root = QVBoxLayout(self)
@@ -96,6 +119,8 @@ class MainWindow(QWidget):
         self.activity.feedback_given.connect(self._on_feedback)
         self.activity.retention_changed.connect(self._on_retention)
         self.diagnostics.rescan_requested.connect(self.rescan_room)
+        self.settings.sign_in_requested.connect(self.connect_camera)
+        self.settings.launch_at_login_changed.connect(self._set_launch_at_login)
 
         self.bridge = _Bridge()
         self.bridge.frame.connect(self._on_frame)
@@ -116,6 +141,9 @@ class MainWindow(QWidget):
         self.reload_from_prefs()
         self.activity.set_retention(prefs.keep_thumbnails_days, prefs.save_thumbnails)
         self.activity.refresh()
+        self.settings.set_launch_at_login(prefs.launch_at_login)
+        self._refresh_settings()
+        self.updater.start()
 
     # -------------------------------------------------------------------- tray
 
@@ -158,6 +186,9 @@ class MainWindow(QWidget):
 
     def arm(self) -> None:
         state = self.engine.state
+        if not (self.prefs.camera or {}).get("kind"):
+            self.connect_camera()
+            return
         if not state.has_map:
             self.run_setup()
             return
@@ -194,10 +225,78 @@ class MainWindow(QWidget):
                 f"{outcome.error}\n\nCheck the output device in System Settings > Sound.",
             )
 
+    # ---------------------------------------------------------- camera account
+
+    def connect_camera(self) -> bool:
+        """Sign in to Eufy and adopt the chosen camera as the live source."""
+        account = EufyAccount(
+            username=str((self.prefs.camera or {}).get("username", "")),
+            country=str((self.prefs.camera or {}).get("country", "US")),
+        )
+        dialog = EufySignInDialog(account, self)
+        if dialog.exec() != EufySignInDialog.DialogCode.Accepted or dialog.chosen is None:
+            return False
+
+        device = dialog.chosen
+        from .camera.sources.eufy_bridge import EufyBridgeCamera
+
+        was_running = self.engine.running
+        if was_running:
+            self.engine.stop()
+        if self.supervisor is not None and self.supervisor is not dialog.supervisor:
+            self.supervisor.stop()
+        self.supervisor = dialog.supervisor
+        self.engine.bridge = self.supervisor
+
+        source = EufyBridgeCamera(
+            client=dialog.client,
+            serial=str(device.get("serialNumber", "")),
+            model=str(device.get("model", "")),
+            name=str(device.get("name", "")),
+        )
+        self.engine.source = source
+        self.prefs.camera = {
+            "kind": "eufy",
+            "username": dialog.account.username,
+            "country": dialog.account.country,
+            "serial": source.serial,
+            "model": source.model,
+            "name": source.device_name,
+        }
+        self.prefs.save()
+        self.engine.detector = _make_detector(self.prefs, source)
+        self._refresh_settings()
+        try:
+            self.engine.start()
+        except SourceError as exc:
+            QMessageBox.warning(self, "Camera trouble", str(exc))
+            return False
+        if self.engine.room_map is None:
+            QMessageBox.information(
+                self, "Camera connected",
+                "Next, Surface Guard will look around the room so you can draw the "
+                "surfaces you want protected.",
+            )
+            return self.run_setup()
+        return True
+
+    def _refresh_settings(self) -> None:
+        username = str((self.prefs.camera or {}).get("username", ""))
+        message = self.supervisor.status.message if self.supervisor else "Not started"
+        self.settings.set_account(username, message)
+        self.settings.refresh()
+
+    def _set_launch_at_login(self, on: bool) -> None:
+        self.prefs.launch_at_login = set_launch_at_login(on)
+        self.prefs.save()
+
     # ------------------------------------------------------------------- setup
 
     def run_setup(self) -> bool:
-        dialog = OnboardingDialog(self, allow_demo=True)
+        # Re-running setup should default to however the camera is already set up.
+        dialog = OnboardingDialog(
+            self, allow_demo=True, preselect=str((self.prefs.camera or {}).get("kind", "")),
+        )
         dialog.bind_player(lambda: self.engine.player.play("chirp", 0.6))
         if dialog.exec() != OnboardingDialog.DialogCode.Accepted or dialog.room is None:
             if dialog.source is not None and dialog.source is not self.engine.source:
@@ -318,6 +417,8 @@ class MainWindow(QWidget):
         )
         if self.tabs.currentWidget() is self.diagnostics:
             self.diagnostics.refresh()
+        elif self.tabs.currentWidget() is self.settings:
+            self._refresh_settings()
 
     # ------------------------------------------------------------------ awake
 
@@ -354,7 +455,10 @@ class MainWindow(QWidget):
         self.prefs.surfaces = self.editor.surfaces
         self.prefs.save()
         self._hold_awake(False)
+        self.updater.stop()
         self.engine.stop()
+        if self.supervisor is not None:
+            self.supervisor.stop()
         self.log.close()
         QApplication.quit()
 
@@ -400,24 +504,57 @@ def set_launch_at_login(enabled: bool, executable: str | None = None) -> bool:
 # ---------------------------------------------------------------------- startup
 
 
-def _make_source(prefs: Preferences) -> CameraSource | None:
-    from .ui.onboarding import SetupChoice
+def _make_source(prefs: Preferences) -> tuple[CameraSource | None, BridgeSupervisor | None]:
+    """Rebuild the configured camera at startup, or nothing if setup never ran."""
     cfg = prefs.camera or {}
-    if not cfg.get("kind"):
-        return None
+    kind = cfg.get("kind")
+    if not kind:
+        return None, None
+
+    if kind == "eufy":
+        from .bridge.client import BridgeClient
+        from .camera.sources.eufy_bridge import EufyBridgeCamera
+
+        account = EufyAccount(
+            username=str(cfg.get("username", "")), country=str(cfg.get("country", "US"))
+        )
+        supervisor = BridgeSupervisor(account)
+        status = supervisor.start(wait=True)
+        if not status.listening:
+            logger.error("camera service did not start: %s", status.fatal or status.message)
+            return None, supervisor
+        client = BridgeClient(supervisor.url)
+        try:
+            client.connect()
+            state = client.connect_driver()
+        except Exception as exc:
+            logger.error("could not sign in to Eufy: %s", exc)
+            return None, supervisor
+        if state.phase.value != "connected":
+            # A code or captcha cannot be answered without her; the UI will ask.
+            logger.warning("Eufy sign-in needs attention: %s", state.message)
+            return None, supervisor
+        source = EufyBridgeCamera(
+            client=client, serial=str(cfg.get("serial", "")),
+            model=str(cfg.get("model", "")), name=str(cfg.get("name", "")),
+            owns_client=True,
+        )
+        return source, supervisor
+
+    from .ui.onboarding import SetupChoice
     try:
         return _build_source(SetupChoice(
-            kind=cfg["kind"], url=cfg.get("url", ""), serial=cfg.get("serial", "")
-        ))
+            kind=kind, url=cfg.get("url", ""), serial=cfg.get("serial", "")
+        )), None
     except Exception:
-        return None
+        return None, None
 
 
 def _make_detector(prefs: Preferences, source: CameraSource) -> Detector:
     try:
         return load_detector(prefs.model_path, camera=source)
     except Exception as exc:
-        print(f"[app] no detection model ({exc}); using the test detector")
+        logger.warning("no detection model (%s); using the test detector", exc)
         return SyntheticDetector(source) if hasattr(source, "ground_truth_boxes") else _Null()
 
 
@@ -434,13 +571,48 @@ class _Null(Detector):
                             note="No detection model installed — nothing will be detected.")
 
 
+def _selftest(app: QApplication, window: "MainWindow", engine: Engine, out: Path) -> int:
+    """Render the window, save it, and report whether it actually drew anything."""
+    result = {"code": 1}
+
+    def capture() -> None:
+        try:
+            engine.start()
+        except Exception as exc:
+            logger.error("selftest: engine did not start: %s", exc)
+        for _ in range(40):                      # ~2 s of event loop
+            app.processEvents()
+            time.sleep(0.05)
+        pixmap = window.grab()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        saved = pixmap.save(str(out))
+        blank = pixmap.isNull() or pixmap.width() < 200 or pixmap.height() < 200
+        state = engine.state.state()
+        logger.info("selftest: %dx%d saved=%s state=%s tabs=%d",
+                    pixmap.width(), pixmap.height(), saved, state.phase.value,
+                    window.tabs.count())
+        print(f"selftest: window {pixmap.width()}x{pixmap.height()}, "
+              f"tabs={window.tabs.count()}, state={state.phase.value}, saved={saved} -> {out}")
+        result["code"] = 0 if (saved and not blank and window.tabs.count() >= 5) else 1
+        engine.stop()
+        app.quit()
+
+    QTimer.singleShot(400, capture)
+    app.exec()
+    return result["code"]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="surfaceguard")
     ap.add_argument("--background", action="store_true", help="start hidden in the menu bar")
     ap.add_argument("--demo", action="store_true", help="run against the synthetic room")
     ap.add_argument("--model", default=None, help="path to a YOLOv8 ONNX model")
+    ap.add_argument("--verbose", action="store_true", help="debug logging")
+    ap.add_argument("--selftest", metavar="PNG", default=None,
+                    help="start, screenshot the window to PNG, then exit (build check)")
     args = ap.parse_args(argv)
 
+    setup_logging(verbose=args.verbose)
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Surface Guard")
     app.setQuitOnLastWindowClosed(False)
@@ -452,7 +624,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.demo:
         prefs.camera = {"kind": "demo", "url": "", "serial": ""}
 
-    source = _make_source(prefs)
+    # Remove the bundle a previous update left behind, before anything else runs.
+    cleanup_previous()
+
+    source, supervisor = _make_source(prefs)
     if source is None:
         from .camera.sources.synthetic import SyntheticCamera
         source = SyntheticCamera()
@@ -465,18 +640,25 @@ def main(argv: list[str] | None = None) -> int:
     engine = Engine(source, detector, prefs, room_map=room,
                     player=Player(volume=prefs.master_volume), log=log, state=state)
 
-    window = MainWindow(engine, prefs, log)
+    window = MainWindow(engine, prefs, log, updater=Updater(), supervisor=supervisor)
     if not args.background:
         window.show()
+
+    if args.selftest:
+        # Proves a *packaged* build really renders: a frozen app that starts but
+        # draws nothing looks identical to a healthy one from the outside.
+        return _selftest(app, window, engine, Path(args.selftest))
+
     if room is None:
         QTimer.singleShot(300, window.run_setup)
     else:
         try:
             engine.start()
         except SourceError as exc:
-            print(f"[app] camera unavailable at startup: {exc}")
+            logger.error("camera unavailable at startup: %s", exc)
 
-    print(f"[app] settings: {support_dir()}")
+    logger.info("%s", build_info.describe())
+    logger.info("settings: %s", support_dir())
     return app.exec()
 
 

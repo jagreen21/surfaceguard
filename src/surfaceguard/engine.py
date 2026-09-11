@@ -15,6 +15,7 @@ from typing import Callable
 import numpy as np
 
 from .audio.player import Player
+from .logging_setup import get as get_logger
 from .camera.panorama import RoomMap
 from .camera.registration import MIN_INLIERS, Registrar
 from .camera.scan_scheduler import Plan, ScanRunner, plan_scan
@@ -27,6 +28,8 @@ from .health.heartbeat import Metrics, Report, run_checks
 from .state import Intent, StateStore
 from .storage.activity_log import ActivityLog
 from .storage.preferences import Preferences
+
+logger = get_logger("engine")
 
 HEARTBEAT_EVERY_S = 20.0
 SCAN_REPLAN_EVERY_S = 30.0
@@ -74,6 +77,10 @@ class Engine:
         self.room_map: RoomMap | None = None
         self.last_result: FrameResult | None = None
         self.last_report: Report | None = None
+        # Set by the app when a supervised bridge and an updater exist, so their
+        # health reaches the same derived state everything else does (D4).
+        self.bridge = None
+        self.updater = None
 
         self.on_frame: Callable[[FrameResult], None] | None = None
         self.on_trigger: Callable[[Decision, FrameResult], None] | None = None
@@ -137,7 +144,7 @@ class Engine:
             except Exception as exc:  # a bad frame must not kill the guard
                 self.metrics.registered = False
                 self.last_report = None
-                print(f"[engine] frame failed: {exc}")
+                logger.exception("frame failed: %s", exc)
             slack = interval - (time.monotonic() - cycle_started)
             if slack > 0:
                 self._stop.wait(slack)
@@ -327,6 +334,8 @@ class Engine:
             min_inliers=self.registrar.min_inliers,
             surfaces_total=len(enabled),
             surfaces_covered=covered,
+            bridge=self.bridge.status if self.bridge is not None else None,
+            update_token=self.updater.status.token if self.updater is not None else None,
             now=now,
         )
         self.last_report = report

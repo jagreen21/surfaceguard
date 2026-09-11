@@ -63,6 +63,102 @@ registration works across the whole pan range and how fast, whether angle hints
 matter, whether the camera's own speaker is reachable, end-to-end latency, and
 recovery after an interruption.
 
+## Shipping it to someone else's Mac
+
+Everything the app needs is inside the bundle. There is no Docker, no Node
+install, no terminal, and no `ffmpeg` on the target machine.
+
+### One-time setup on the build machine
+
+```bash
+python packaging/fetch_runtime.py
+```
+
+Downloads the self-contained Node runtime from nodejs.org (verified against
+Node's published SHA-256 sums) and `npm install`s the Eufy bridge into
+`runtime/`. Homebrew's node links ~20 Homebrew dylibs and cannot be bundled.
+
+### Build and publish
+
+```bash
+python packaging/make_release.py --version 0.2.0 --with-onnx
+```
+
+Builds the `.app`, signs it, zips it with `ditto`, verifies the signature
+survives the round trip, signs a manifest with an Ed25519 key from your Keychain,
+and publishes the release to GitHub. `--show-key` prints the public half;
+`--no-upload` stops before publishing.
+
+The signing key is generated on first use and stored in your Keychain. **Back it
+up.** Losing it means every shipped app will reject all future updates, and the
+only fix is reinstalling by hand.
+
+### Signing
+
+The build picks the best identity available, in this order:
+
+1. **Developer ID Application** — notarisable, no Gatekeeper warning
+2. **Apple Development** — what you have now
+3. **ad-hoc**
+
+Apple Development is preferred over ad-hoc even though it buys nothing from
+Gatekeeper, because it is a *stable* identity across builds. An ad-hoc signature
+changes every build, which makes macOS treat each update as a different app.
+
+Without a Developer ID, her first launch needs a one-time bypass:
+right-click the app → **Open** → **Open**, or `xattr -dr com.apple.quarantine`
+when you install it. After that, updates install silently — files fetched by
+Python are not quarantined the way browser downloads are.
+
+Install it to **`~/Applications`**, not `/Applications`. The app replaces its own
+bundle when updating, which needs write access to the containing folder.
+
+### Updates
+
+The app checks every 6 hours and verifies twice: the download's SHA-256 must
+match the manifest, and the manifest must carry a valid Ed25519 signature from
+your key. Whoever controls the release host still cannot put code on her Mac.
+
+Her Mac holds a read-only fine-grained GitHub token in the Keychain, pasted into
+**Settings → Automatic updates**. Because a token that expires would stop updates
+with no visible symptom, it is re-checked **daily** and GitHub's own expiry header
+is used to warn 14 days ahead. A dead token shows in Settings and in the app's
+self-check — as a warning, not a failure, since updates being stuck does not stop
+the app guarding.
+
+### When it breaks and you are not there
+
+A packaged app has nowhere to print, so everything goes to
+`~/Library/Logs/SurfaceGuard/`. In **Diagnostics** there are two buttons:
+**Copy diagnostics** puts version, camera state, self-check results, metrics and
+the last log lines on the clipboard for her to paste to you — with no passwords or
+tokens in it — and **Show log files** opens the folder.
+
+### Checking a build really works
+
+```bash
+"dist/Surface Guard.app/Contents/MacOS/Surface Guard" --demo --selftest /tmp/check.png
+```
+
+Starts the packaged app, renders the window, saves a screenshot and exits non-zero
+if it drew nothing. A frozen app that starts but renders nothing looks identical
+to a healthy one from the outside, so this is checked rather than assumed.
+
+## Connecting her camera
+
+**Settings → Sign in to the camera account** asks for the Eufy email, password and
+region, handles two-factor codes and captchas, then lists the cameras on the
+account so she can pick one.
+
+The password goes straight to the macOS Keychain and never into the app's own
+files. The bridge needs it in a config file — it reads no environment variables —
+so that file is written `0600` and deleted the moment the bridge has read it,
+which is about two seconds per start.
+
+Secrets are read through `/usr/bin/security` rather than directly, because the
+Keychain grants access per accessing binary; reading it from the app itself would
+re-prompt after every update.
+
 ## Tests
 
 ```bash
@@ -91,9 +187,21 @@ src/surfaceguard/
 │   └── trigger_policy.py dwell, hysteresis, cooldown, schedule
 ├── audio/player.py      synthesised cues, pre-opened device
 ├── health/heartbeat.py  the self-test behind "Protecting"
+├── bridge/
+│   ├── supervisor.py    owns the bundled Node bridge process
+│   ├── client.py        the eufy-security-ws protocol
+│   └── credentials.py   Keychain, via /usr/bin/security
+├── update/
+│   ├── updater.py       check · verify · stage · swap · relaunch
+│   ├── manifest.py      Ed25519-signed release descriptions
+│   └── access.py        GitHub, and whether the token still works
+├── logging_setup.py     file logging; a packaged app cannot print
 ├── storage/             preferences · room map · activity log
-└── ui/                  onboarding · home · surface editor · activity · diagnostics
+└── ui/                  onboarding · home · surface editor · activity ·
+                         diagnostics · settings · connect
 tools/phase0.py          feasibility harness
+packaging/               fetch_runtime · build_app · make_release
+runtime/                 bundled Node + Eufy bridge (not in git)
 legacy/                  the original Raspberry Pi prototype
 ```
 

@@ -79,7 +79,12 @@ class _Page(QWidget):
 class OnboardingDialog(QDialog):
     """Runs setup and hands back a connected source and a stitched room map."""
 
-    def __init__(self, parent: QWidget | None = None, allow_demo: bool = True) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        allow_demo: bool = True,
+        preselect: str = "",
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Set up Surface Guard")
         self.setMinimumSize(720, 520)
@@ -186,6 +191,10 @@ class OnboardingDialog(QDialog):
         root.addWidget(self.stack, 1)
         root.addLayout(nav)
 
+        if preselect:
+            index = self.kind.findData(preselect)
+            if index >= 0:
+                self.kind.setCurrentIndex(index)
         self._sync_connect_fields()
         self._sync_nav()
 

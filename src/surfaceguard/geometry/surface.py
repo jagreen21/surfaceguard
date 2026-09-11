@@ -6,6 +6,11 @@ gate. For a planar surface, apparent depth is proportional to ``1 / w`` where
 height of a fixed real-world object is ``k * w`` for a single scalar ``k``. That
 makes the gate self-calibrating from confirmed detections instead of needing the
 user to measure anything.
+
+``Tuning`` holds what the weekly review learned about this particular surface.
+It lives here, in map coordinates, for the same reason the polygon does: a spot
+that reads as a cat every night at 3 a.m. is a fact about the room, not about a
+frame, and it has to survive the camera turning away and coming back.
 """
 
 from __future__ import annotations
@@ -54,6 +59,65 @@ class ScheduleWindow:
         return minute_of_day >= self.start_minute or minute_of_day < self.end_minute
 
 
+# "After dark" for a night-only adjustment. Deliberately generous at both ends:
+# the shadows that cause these false alarms arrive before the user calls it night.
+NIGHT_START_MINUTE = 20 * 60
+NIGHT_END_MINUTE = 6 * 60
+
+
+def is_night(minute_of_day: int) -> bool:
+    return minute_of_day >= NIGHT_START_MINUTE or minute_of_day < NIGHT_END_MINUTE
+
+
+@dataclass
+class BlindSpot:
+    """A place on this surface that the user has confirmed is not a cat.
+
+    Stored in map coordinates. ``radius`` is in the same units, so the spot keeps
+    its real size and position when the camera pans back to it.
+    """
+
+    x: float
+    y: float
+    radius: float
+    night_only: bool = False
+    note: str = ""
+    created: float = 0.0
+
+    def covers(self, point: tuple[float, float], minute_of_day: int | None = None) -> bool:
+        if self.night_only and minute_of_day is not None and not is_night(minute_of_day):
+            return False
+        dx, dy = point[0] - self.x, point[1] - self.y
+        return (dx * dx + dy * dy) <= self.radius * self.radius
+
+    def describe(self) -> str:
+        when = " after dark" if self.night_only else ""
+        return f"{self.note or 'a spot you marked'}{when}"
+
+
+@dataclass
+class Tuning:
+    """What the weekly review changed about this surface.
+
+    Every field is optional and every field is removable, because the review has
+    to be able to say "undo that" and mean it. An adjustment that cannot be taken
+    back is a worse failure than the false alarm it was trying to fix.
+    """
+
+    blind_spots: list[BlindSpot] = field(default_factory=list)
+    min_score: float | None = None
+    scale_tolerance: float | None = None
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.blind_spots and self.min_score is None and self.scale_tolerance is None
+
+    def blind_spot_at(
+        self, point: tuple[float, float], minute_of_day: int | None = None
+    ) -> BlindSpot | None:
+        return next((b for b in self.blind_spots if b.covers(point, minute_of_day)), None)
+
+
 @dataclass
 class Deterrent:
     """Per-surface deterrent settings, in the user's vocabulary."""
@@ -82,6 +146,7 @@ class Surface:
     height_samples: list[float] = field(default_factory=list)
     deterrent: Deterrent = field(default_factory=Deterrent)
     schedule: ScheduleWindow = field(default_factory=ScheduleWindow)
+    tuning: Tuning = field(default_factory=Tuning)
 
     def __post_init__(self) -> None:
         self.polygon = np.asarray(self.polygon, dtype=np.float64).reshape(-1, 2)
@@ -155,6 +220,16 @@ class Surface:
         self.height_samples.append(box.height / w)
         if len(self.height_samples) > MAX_HEIGHT_SAMPLES:
             del self.height_samples[0]
+
+    def scale_tolerance(self, default: float) -> float:
+        """The size tolerance in force, after any adjustment the review made."""
+        tol = self.tuning.scale_tolerance
+        return default if tol is None else max(1.05, float(tol))
+
+    def paw_in_map(self, pose: Pose, paw: tuple[float, float]) -> tuple[float, float]:
+        """A frame-space paw point in map coordinates, for room-anchored tests."""
+        pt = transform_points(np.linalg.inv(pose.map_to_frame), [paw])[0]
+        return float(pt[0]), float(pt[1])
 
     def forget_last_observation(self) -> None:
         """Undo the most recent sample, for when the user marks it 'not a cat'."""
