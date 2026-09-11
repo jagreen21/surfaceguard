@@ -22,6 +22,10 @@ class Release:
     version: str
     sha256: str
     size: int
+    # "app" replaces the whole bundle; "model" swaps only the detector. A model is
+    # ~99 MB against a 245 MB app, and a better detector should not cost a full
+    # reinstall — nor a restart, since nothing else changed.
+    kind: str = "app"
     notes: str = ""
     asset_name: str = ""
     asset_id: int = 0
@@ -70,6 +74,9 @@ def verify(release: Release, signature_hex: str, public_key_hex: str) -> tuple[b
     except (ValueError, TypeError) as exc:
         return False, f"the update signature is malformed ({exc})"
     return True, ""
+
+
+APP, MODEL = "app", "model"
 
 
 def is_newer(candidate: str, current: str) -> bool:

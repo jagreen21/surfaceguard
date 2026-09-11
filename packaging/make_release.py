@@ -141,6 +141,9 @@ def main() -> int:
     ap.add_argument("--no-build", action="store_true", help="use the existing dist/*.app")
     ap.add_argument("--no-upload", action="store_true")
     ap.add_argument("--with-onnx", action="store_true")
+    ap.add_argument("--model", type=Path,
+                    help="publish a detector update instead of a whole app: ~99 MB "
+                         "rather than 245 MB, and it installs without a restart")
     args = ap.parse_args()
 
     key = load_or_create_key()
@@ -150,6 +153,9 @@ def main() -> int:
         return 0
     if not args.version:
         ap.error("--version is required")
+
+    if args.model:
+        return _publish_model(args, key, pub)
 
     app = DIST / f"{APP_NAME}.app"
     if not args.no_build:
@@ -197,6 +203,50 @@ def main() -> int:
     print(f"  public key: {pub}")
     print(f"  archive   : {archive}")
     print(f"  manifest  : {manifest}")
+    return 0
+
+
+def _publish_model(args, key, pub) -> int:
+    """Publish a detector on its own, verified before anyone downloads it."""
+    from surfaceguard.update.manifest import MODEL, Release
+
+    model = args.model
+    if not model.exists():
+        raise SystemExit(f"no model at {model}")
+    if model.suffix != ".onnx":
+        raise SystemExit("a detector update must be a .onnx file")
+
+    # Load it here rather than discovering on her Mac that it is unusable.
+    sys.path.insert(0, str(ROOT / "src"))
+    from surfaceguard.detection.cat_detector import OnnxDetector
+
+    log(f"checking {model.name} loads")
+    OnnxDetector(model)
+
+    blob = model.read_bytes()
+    DIST.mkdir(parents=True, exist_ok=True)
+    staged = DIST / model.name
+    if staged.resolve() != model.resolve():
+        staged.write_bytes(blob)
+
+    release = Release(
+        version=args.version, sha256=hashlib.sha256(blob).hexdigest(), size=len(blob),
+        kind=MODEL, notes=args.notes, asset_name=model.name,
+    )
+    manifest = DIST / MANIFEST_ASSET
+    if args.no_upload:
+        _write_manifest(manifest, release, key)
+        log(f"built but not uploaded: {staged} ({len(blob) / 1e6:.0f} MB)")
+    else:
+        publish(args.repo, args.version, staged, _write_manifest(manifest, release, key),
+                args.notes)
+        release.asset_id = _lookup_asset_id(args.repo, args.version, model.name)
+        _write_manifest(manifest, release, key)
+        subprocess.run(["gh", "release", "upload", f"v{args.version}", str(manifest),
+                        "--repo", args.repo, "--clobber"], check=True)
+    print(f"\nDetector release {args.version} ready.")
+    print(f"  public key: {pub}")
+    print(f"  model     : {staged} ({len(blob) / 1e6:.0f} MB)")
     return 0
 
 

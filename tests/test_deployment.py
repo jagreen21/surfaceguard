@@ -368,3 +368,67 @@ def test_a_missing_detector_stops_the_app_claiming_to_protect():
         detector_available=True,
     )
     assert store.report.ok and store.state().phase is Phase.GUARDING
+
+
+# -------------------------------------------------- detector-only updates
+
+
+def test_release_kind_is_covered_by_the_signature(keypair):
+    """Flipping a model release into an app release must not verify."""
+    from surfaceguard.update.manifest import MODEL
+
+    key, pub = keypair
+    release = make_release(kind=MODEL)
+    signature = key.sign(release.signing_payload()).hex()
+    assert verify(release, signature, pub)[0]
+
+    forged = make_release(kind="app")
+    assert not verify(forged, signature, pub)[0]
+
+
+def test_a_model_update_installs_without_staging_a_bundle(tmp_path, monkeypatch, keypair):
+    import hashlib
+
+    import surfaceguard.update.updater as mod
+    from surfaceguard.update.manifest import MODEL
+
+    key, pub = keypair
+    blob = Path("models/yolov8m.onnx").read_bytes()
+    release = Release(version="9.9.9", sha256=hashlib.sha256(blob).hexdigest(),
+                      size=len(blob), kind=MODEL, asset_name="yolov8m.onnx", asset_id=7)
+    manifest = release.to_json(key.sign(release.signing_payload()).hex()).encode()
+
+    monkeypatch.setattr(mod.access, "latest_release", lambda repo, token=None: {
+        "assets": [{"name": "release.json", "id": 1}, {"name": "yolov8m.onnx", "id": 7}]})
+    monkeypatch.setattr(mod.access, "download_asset",
+                        lambda repo, aid, token=None: manifest if aid == 1 else blob)
+    monkeypatch.setattr(mod, "support_dir", lambda: tmp_path)
+
+    updater = Updater(repo="x/y", public_key=pub, current_version="0.1.0")
+    assert updater.check().state is UpdateState.AVAILABLE
+    status = updater.download()
+    assert status.state is UpdateState.READY, status.message
+    assert status.staged is None, "a detector update must not stage an app bundle"
+    assert (tmp_path / "models" / "yolov8m.onnx").exists()
+
+
+def test_a_model_that_will_not_load_is_discarded(tmp_path, monkeypatch, keypair):
+    """Signed is not the same as usable; a broken model would blind the app."""
+    import surfaceguard.update.updater as mod
+
+    monkeypatch.setattr(mod, "support_dir", lambda: tmp_path)
+    updater = Updater(repo="x/y", public_key="", current_version="0.1.0")
+    error = updater.install_model(b"not an onnx file at all",
+                                  make_release(asset_name="yolov8m.onnx"))
+    assert "would not load" in error
+    assert not (tmp_path / "models" / "yolov8m.onnx").exists()
+    assert not list((tmp_path / "models").glob("*.incoming")), "left a temp file behind"
+
+
+def test_a_model_release_must_actually_be_a_model(tmp_path, monkeypatch):
+    import surfaceguard.update.updater as mod
+
+    monkeypatch.setattr(mod, "support_dir", lambda: tmp_path)
+    updater = Updater(repo="x/y", public_key="", current_version="0.1.0")
+    assert "does not look like a detector" in updater.install_model(
+        b"x", make_release(asset_name="SurfaceGuard.zip"))

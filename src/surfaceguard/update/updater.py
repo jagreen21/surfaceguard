@@ -25,7 +25,7 @@ from pathlib import Path
 
 from ..storage.preferences import support_dir
 from . import access, build_info
-from .manifest import Release, is_newer, verify
+from .manifest import MODEL, Release, is_newer, verify
 
 MANIFEST_ASSET = "release.json"
 CHECK_EVERY_S = 6 * 3600
@@ -187,6 +187,16 @@ class Updater:
         if progress:
             progress(len(blob), len(blob))
 
+        if release.kind == MODEL:
+            error = self.install_model(blob, release)
+            if error:
+                return self._fail(error)
+            self.status.staged = None
+            return self._set(
+                UpdateState.READY,
+                f"A better cat detector ({release.version}) is installed.",
+            )
+
         try:
             staged = self._unpack(blob, release)
         except Exception as exc:
@@ -194,6 +204,32 @@ class Updater:
 
         self.status.staged = staged
         return self._set(UpdateState.READY, f"Version {release.version} is ready to install")
+
+    def install_model(self, blob: bytes, release: Release) -> str:
+        """Install a detector update. Returns '' on success.
+
+        No bundle swap and no restart: the file lands beside the app's settings,
+        where cat_detector looks before the bundled copy, and the engine picks it
+        up on the next detector reload.
+        """
+        target_dir = support_dir() / "models"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        name = release.asset_name or "yolov8m.onnx"
+        if not name.endswith(".onnx"):
+            return "That update does not look like a detector."
+        staged = target_dir / (name + ".incoming")
+        try:
+            staged.write_bytes(blob)
+            # Prove it loads before it becomes the model in use. A signed file that
+            # onnxruntime cannot open would otherwise blind the app on next start.
+            from ..detection.cat_detector import OnnxDetector
+
+            OnnxDetector(staged)
+            staged.replace(target_dir / name)
+        except Exception as exc:
+            staged.unlink(missing_ok=True)
+            return f"The new detector would not load, so it was discarded: {exc}"
+        return ""
 
     def _unpack(self, blob: bytes, release: Release) -> Path:
         work = Path(tempfile.mkdtemp(prefix="sg-update-", dir=str(cache_dir())))

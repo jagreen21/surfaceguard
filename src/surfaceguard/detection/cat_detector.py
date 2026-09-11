@@ -40,7 +40,9 @@ def bundled_model_path() -> Path | None:
     Inside the .app it sits in Resources; in a checkout it sits in models/. She
     should never have to know either of those things.
     """
-    roots = []
+    # A model delivered by an update outranks the bundled one: it is newer by
+    # definition, and it must not require reinstalling the app to take effect.
+    roots = [Path.home() / "Library" / "Application Support" / "SurfaceGuard" / "models"]
     frozen = getattr(sys, "_MEIPASS", None)
     if frozen:
         roots += [Path(frozen) / "models",
