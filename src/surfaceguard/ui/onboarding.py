@@ -48,6 +48,17 @@ from . import qtutil as Q
 from .home import LiveView
 
 # Eufy accounts are region-locked, and the wrong region is a common silent failure.
+# Friendly names for the models this is likely to meet, so the picker does not
+# just show three part numbers.
+MODEL_NAMES = {
+    "T8417": "Indoor Cam E30",
+    "T8416": "Indoor Cam E220",
+    "T8410": "Indoor Cam Pan & Tilt",
+    "T8414": "Indoor Cam C210",
+    "T8441": "SoloCam",
+    "T8600": "eufyCam",
+}
+
 COUNTRIES = [
     ("United States", "US"), ("United Kingdom", "GB"), ("Canada", "CA"),
     ("Germany", "DE"), ("France", "FR"), ("Netherlands", "NL"), ("Spain", "ES"),
@@ -77,6 +88,7 @@ class SetupChoice:
 class _SignInWorker(QObject):
     settled = Signal(object)
     failed = Signal(str)
+    devices_found = Signal(object)
 
     def __init__(self, supervisor: BridgeSupervisor, client: BridgeClient | None) -> None:
         super().__init__()
@@ -86,6 +98,11 @@ class _SignInWorker(QObject):
 
     def run(self) -> None:
         try:
+            if self.answer == ("devices", ""):
+                # Off the GUI thread: finding devices takes seconds, and doing it
+                # in a signal handler froze the window on "Looking for cameras…".
+                self.devices_found.emit(self.client.wait_for_devices())
+                return
             if self.answer is None:
                 status = self.supervisor.start(wait=True)
                 if not status.listening:
@@ -141,7 +158,9 @@ class OnboardingDialog(QDialog):
                            "Use the same account you use in the Eufy app."),
         Page.CHALLENGE: ("One more check", "Eufy wants to be sure it is really you."),
         Page.PICKER: ("Choose your camera",
-                      "Pick the one pointing at the surfaces you want protected."),
+                      "Pick the one pointing at the surfaces you want protected — the "
+                      "names are the ones you gave them in the Eufy app. You will see "
+                      "its picture next, and can come back if it is the wrong one."),
         Page.CONFIRM: ("Is this the right camera?",
                        "Point it at the counter, table or shelf you want protected, "
                        "then leave it there."),
@@ -162,6 +181,8 @@ class OnboardingDialog(QDialog):
         existing_source: CameraSource | None = None,
         account: EufyAccount | None = None,
         sign_in_only: bool = False,
+        supervisor: BridgeSupervisor | None = None,
+        client: BridgeClient | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Set up Surface Guard")
@@ -170,8 +191,12 @@ class OnboardingDialog(QDialog):
         self.account = account or EufyAccount(username="")
         self.sign_in_only = sign_in_only
         self.source: CameraSource | None = None
-        self.supervisor: BridgeSupervisor | None = None
-        self.client: BridgeClient | None = None
+        # A bridge and sign-in handed in from a previous run of this dialog. Closing
+        # setup used to throw the signed-in session away, so coming back meant
+        # typing the password again even though the bridge was still connected.
+        self.supervisor = supervisor
+        self.client = client
+        self.resumed = False
         self.chosen: dict | None = None
         self.room: RoomMap | None = None
         self.adopted = False
@@ -230,10 +255,26 @@ class OnboardingDialog(QDialog):
             self.adopted = True
             self._go(Page.CONFIRM)
             self._pump_preview()
+        elif self._already_signed_in():
+            # Straight back to choosing a camera; the sign-in still stands.
+            self.resumed = True
+            self._say("Still signed in to Eufy.")
+            self._go(Page.PICKER)
+            self._run_signin(("devices", ""))
         elif sign_in_only:
             self._go(Page.CREDENTIALS)
         else:
             self._go(Page.KIND)
+
+    def _already_signed_in(self) -> bool:
+        """Is there a live bridge with a connected driver from a previous attempt?"""
+        return (
+            self.client is not None
+            and self.client.connected
+            and self.client.driver.phase is DriverPhase.CONNECTED
+            and self.supervisor is not None
+            and self.supervisor.status.healthy
+        )
 
     # -------------------------------------------------------------- the pages
 
@@ -393,6 +434,14 @@ class OnboardingDialog(QDialog):
         else:
             self.step.setText("")
         heading, subtitle = self.HEADINGS[page]
+        if page is Page.CONFIRM and self.chosen:
+            # With three cameras on the account, "is this the right one?" is only
+            # answerable if she can see which one she is looking at.
+            name = str(self.chosen.get("name") or "").strip()
+            if name:
+                heading = f"Is this {name}?"
+                subtitle = ("If this is the wrong camera, go Back and pick another. "
+                            + subtitle)
         self.heading.setText(heading)
         self.subtitle.setText(subtitle)
 
@@ -408,10 +457,22 @@ class OnboardingDialog(QDialog):
 
     def _back(self) -> None:
         steps = self.route()
-        if self.page in steps:
-            index = steps.index(self.page)
-            if index > 0:
-                self._go(steps[index - 1])
+        if self.page not in steps:
+            return
+        index = steps.index(self.page)
+        if index <= 0:
+            return
+        previous = steps[index - 1]
+        if self.page is Page.CONFIRM and previous is Page.PICKER and not self.adopted:
+            # Release the camera on the way back, so only ever one stream is open.
+            if self.source is not None:
+                try:
+                    self.source.stop()
+                except Exception:
+                    pass
+                self.source = None
+            self.chosen = None
+        self._go(previous)
 
     def _next_page(self) -> Page | None:
         steps = self.route()
@@ -493,6 +554,15 @@ class OnboardingDialog(QDialog):
             self._say(str(exc), bad=True)
             return
         self.password.clear()          # the Keychain has it now
+        # Reuse the running bridge rather than starting another. Every retry used
+        # to leak one: her log showed five of them, on ports 3050 through 3054,
+        # each still listening because nothing ever stopped the previous.
+        if self.supervisor is not None:
+            self.supervisor.stop()
+            self.supervisor = None
+        if self.client is not None:
+            self.client.close()
+            self.client = None
         self.supervisor = BridgeSupervisor(self.account)
         self._say("Starting the camera service and signing in…")
         self._run_signin(None)
@@ -518,6 +588,7 @@ class OnboardingDialog(QDialog):
         self._thread.started.connect(worker.run)
         worker.settled.connect(self._on_signin_settled)
         worker.failed.connect(self._on_signin_failed)
+        worker.devices_found.connect(self._on_devices_found)
         self._thread.start()
 
     def _end_thread(self) -> None:
@@ -538,8 +609,13 @@ class OnboardingDialog(QDialog):
     def _on_signin_settled(self, state) -> None:
         self._end_thread()
         if state.phase is DriverPhase.CONNECTED:
-            self._say("Signed in. Looking for cameras…")
-            self._load_devices()
+            # Remember the account the moment it works, not when setup finishes.
+            # The password is already in the Keychain; without the email and region
+            # beside it, an update or a quit before choosing a camera meant typing
+            # the whole thing again.
+            self._remember_account()
+            self._say("Signed in. Looking for your cameras…")
+            self._run_signin(("devices", ""))
             return
         if state.phase is DriverPhase.NEEDS_CODE:
             self._challenged = True
@@ -566,6 +642,20 @@ class OnboardingDialog(QDialog):
         self._say(state.message or "Eufy refused the sign-in.", bad=True)
         self._go(Page.CREDENTIALS)
 
+    def _remember_account(self) -> None:
+        from ..storage.preferences import Preferences
+
+        try:
+            prefs = Preferences.load()
+            camera = dict(prefs.camera or {})
+            camera.update({"kind": "eufy", "username": self.account.username,
+                           "country": self.account.country})
+            prefs.camera = camera
+            prefs.save()
+        except Exception:
+            # Not being able to remember it is not a reason to stop signing in.
+            pass
+
     def _show_captcha(self, data_uri: str) -> None:
         pix = QPixmap()
         if data_uri.startswith("data:") and "," in data_uri:
@@ -579,27 +669,41 @@ class OnboardingDialog(QDialog):
             self.captcha_image.setPixmap(pix)
         self.captcha_image.setVisible(True)
 
+    def _on_devices_found(self, found: list) -> None:
+        self._end_thread()
+        self._show_devices(found)
+
     def _load_devices(self) -> None:
+        """Synchronous path, used by tests and by Settings."""
         if self.client is None:
             return
         try:
-            found = self.client.devices()
+            self._show_devices(self.client.devices())
         except BridgeError as exc:
             self._say(str(exc), bad=True)
-            return
+
+    def _show_devices(self, found: list) -> None:
         cameras = [d for d in found if looks_like_camera(d)]
         self.devices.clear()
         for device in cameras:
-            item = QListWidgetItem(
-                f"{device.get('name') or device.get('serialNumber', 'camera')}\n"
-                f"{device.get('model') or 'camera'}"
-            )
-            item.setToolTip(str(device.get("serialNumber", "")))
+            serial = str(device.get("serialNumber", ""))
+            name = str(device.get("name") or "").strip()
+            model = MODEL_NAMES.get(str(device.get("model", "")).upper(),
+                                    str(device.get("model") or "Eufy camera"))
+            # The name she gave it in the Eufy app is what tells three cameras
+            # apart; the model and serial are only there to break a tie.
+            label = name or "(unnamed camera)"
+            detail = f"{model}  ·  {serial[-6:] if serial else '?'}"
+            item = QListWidgetItem(f"{label}\n{detail}")
+            item.setToolTip(serial)
             item.setData(Qt.ItemDataRole.UserRole, device)
             self.devices.addItem(item)
         if not cameras:
-            self._say("Signed in, but this account has no cameras on it. Check you used "
-                      "the account the camera is registered to.", bad=True)
+            self._say(
+                "Signed in, but no cameras turned up on this account. Check the "
+                "camera is switched on and set up in the Eufy app, and that this is "
+                "the account it is registered to.", bad=True,
+            )
             return
         self.devices.setCurrentRow(0)
         self._go(Page.PICKER)
@@ -615,6 +719,16 @@ class OnboardingDialog(QDialog):
             self.accept()
             return
         from ..camera.sources.eufy_bridge import EufyBridgeCamera
+
+        # Coming back to try a different camera has to stop the first one. Eufy
+        # serves one livestream at a time, so starting a second without stopping
+        # the first leaves her looking at a picture that never arrives.
+        if self.source is not None and not self.adopted:
+            try:
+                self.source.stop()
+            except Exception:
+                pass
+            self.source = None
 
         self.source = EufyBridgeCamera(
             client=self.client, serial=str(self.chosen.get("serialNumber", "")),
@@ -699,6 +813,9 @@ class OnboardingDialog(QDialog):
         self._end_thread()
         if self.adopted:
             self.source = None          # the camera belongs to the app, not here
+        # A signed-in bridge is deliberately left running when setup is closed: it
+        # is handed back on the next attempt so she does not sign in twice. The app
+        # owns it from here and stops it on quit.
         super().reject()
 
 

@@ -98,6 +98,9 @@ class EufyBridgeCamera(CameraSource):
         except Exception:
             pass
         self._decoder = None
+        # Stop listening, or a camera that has been swapped out keeps receiving
+        # frames on the shared connection.
+        self.client.remove_handler(self._on_event)
         if self.owns_client:
             self.client.close()
 

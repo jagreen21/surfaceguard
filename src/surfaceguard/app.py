@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QLockFile, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -422,6 +422,7 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
         # Re-running setup should default to however the camera is already set up.
         dialog = OnboardingDialog(
             self, allow_demo=True, preselect=str((self.prefs.camera or {}).get("kind", "")),
+            supervisor=self.supervisor, client=getattr(self, "bridge_client", None),
         )
         dialog.bind_player(lambda: self.engine.player.play("chirp", 0.6))
         if dialog.exec() != OnboardingDialog.DialogCode.Accepted or dialog.room is None:
@@ -432,6 +433,11 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
         was_running = self.engine.running
         if was_running:
             self.engine.stop()
+        if dialog.client is not None:
+            self.bridge_client = dialog.client
+        if dialog.supervisor is not None:
+            self.supervisor = dialog.supervisor
+            self.engine.bridge = self.supervisor
         if dialog.source is not None:
             self.engine.source = dialog.source
             self.prefs.camera = {
@@ -833,7 +839,9 @@ class MainWindow(ReviewFlow, QWidget):
     def run_setup(self, existing_source=None) -> bool:
         dialog = OnboardingDialog(self, allow_demo=True,
                                   preselect=str((self.prefs.camera or {}).get("kind", "")),
-                                  existing_source=existing_source)
+                                  existing_source=existing_source,
+                                  supervisor=self.supervisor,
+                                  client=getattr(self, "bridge_client", None))
         dialog.bind_player(lambda: self.engine.player.play("chirp", 0.6))
         if dialog.exec() != OnboardingDialog.DialogCode.Accepted or dialog.room is None:
             if dialog.source is not None and dialog.source is not self.engine.source:
@@ -841,6 +849,11 @@ class MainWindow(ReviewFlow, QWidget):
             return False
         if self.engine.running:
             self.engine.stop()
+        if dialog.client is not None:
+            self.bridge_client = dialog.client
+        if dialog.supervisor is not None:
+            self.supervisor = dialog.supervisor
+            self.engine.bridge = self.supervisor
         if dialog.source is not None:
             self.engine.source = dialog.source
             self.prefs.camera = {"kind": dialog.choice().kind, "url": dialog.choice().url,
@@ -1238,6 +1251,21 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     setup_logging(verbose=args.verbose)
+
+    # One copy, always. Two were running on her Mac — the installer started one and
+    # the launch agent another — and because each builds its own bridge, that meant
+    # two simultaneous logins to one Eufy account, racing on the same session file.
+    # A launch agent execs the binary directly, so LaunchServices does not treat it
+    # as the same app and will happily start another; the guard has to be here.
+    lock = QLockFile(str(support_dir() / "surfaceguard.lock"))
+    lock.setStaleLockTime(60_000)
+    if not lock.tryLock(200):
+        logger.info("another copy is already running; bringing it to the front")
+        bundle = build_info.bundle_path()
+        if bundle is not None:
+            subprocess.Popen(["/usr/bin/open", str(bundle)])
+        return 0
+
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Surface Guard")
     app.setQuitOnLastWindowClosed(False)

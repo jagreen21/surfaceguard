@@ -16,6 +16,7 @@ disagree in ways that matter:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import time
@@ -26,7 +27,9 @@ from enum import Enum
 
 SCHEMA_VERSION = 21
 DEFAULT_TIMEOUT = 15.0
-CONNECT_TIMEOUT = 75.0
+# Eufy's v6 login is slow before it says anything useful, and slower on an older
+# machine. This is the budget for "sign in, and tell me if you need a code".
+CONNECT_TIMEOUT = 150.0
 
 
 class BridgeError(RuntimeError):
@@ -74,6 +77,7 @@ class BridgeClient:
         self._pending: dict[str, _Pending] = {}
         self._lock = threading.Lock()
         self._handlers: list[Callable[[dict], None]] = []
+        self._listening = False
         self._driver_settled = threading.Event()
 
     # ------------------------------------------------------------- lifecycle
@@ -91,6 +95,17 @@ class BridgeClient:
         self._reader = threading.Thread(target=self._read_loop, name="sg-bridge-ws", daemon=True)
         self._reader.start()
         self.send_wait("set_api_schema", schemaVersion=SCHEMA_VERSION)
+        # start_listening must come before anything that produces an event.
+        #
+        # The bridge gates every forwarded event on a per-client receiveEvents flag
+        # (forward.js: `if (client.receiveEvents && client.isConnected)`), and that
+        # flag is only set inside the start_listening handler. Calling it after
+        # driver.connect — which is what the device list seems to want, since it is
+        # empty until sign-in succeeds — means the captcha request, the connected
+        # event and the connection error are all sent to nobody, and sign-in can
+        # only ever end in a timeout. It is called again later for the devices; it
+        # is idempotent.
+        self._start_listening()
 
     def close(self) -> None:
         self._stop.set()
@@ -110,6 +125,11 @@ class BridgeClient:
 
     def add_handler(self, handler: Callable[[dict], None]) -> None:
         self._handlers.append(handler)
+
+    def remove_handler(self, handler: Callable[[dict], None]) -> None:
+        """Drop a handler, so a camera that has been swapped out stops listening."""
+        with contextlib.suppress(ValueError):
+            self._handlers.remove(handler)
 
     # -------------------------------------------------------------- messaging
 
@@ -143,14 +163,21 @@ class BridgeClient:
         """
         self.driver = DriverState(phase=DriverPhase.CONNECTING, message="Signing in…")
         self._driver_settled.clear()
-        self.send_wait("driver.connect", timeout=DEFAULT_TIMEOUT)
-        # success:true here only means "the request was accepted"; the outcome is
-        # an event, so wait for that rather than believing the acknowledgement.
+        # Deliberately not send_wait. The result carries no information — the bridge
+        # answers success:true even when the sign-in fails — and waiting 15s for a
+        # meaningless acknowledgement was enough to abandon a sign-in that was still
+        # in progress. Eufy's v6 login does a domain lookup and a key exchange
+        # before it even reaches the password, which took 9 seconds on her Mac; if a
+        # captcha is then required, the useful answer arrives well after that, as an
+        # event. So: fire the command, and wait only for something that means
+        # something.
+        self.send("driver.connect")
         self._driver_settled.wait(timeout=timeout)
         if self.driver.phase is DriverPhase.CONNECTING:
             self.driver.phase = DriverPhase.FAILED
             self.driver.message = (
-                "Signing in to Eufy timed out. Check the internet connection and try again."
+                "Eufy did not answer the sign-in. This is usually temporary — try "
+                "again in a minute."
             )
         return self.driver
 
@@ -169,10 +196,58 @@ class BridgeClient:
         self._driver_settled.wait(timeout=timeout)
         return self.driver
 
-    def devices(self) -> list[dict]:
-        """Cameras the account can see. Empty until the driver has connected."""
+    def _start_listening(self) -> dict:
+        """Subscribe to events, and return whatever state the bridge reports."""
         state = self.send_wait("start_listening", timeout=20.0)
-        return list((state.get("state") or {}).get("devices") or [])
+        self._listening = True
+        return state
+
+    @property
+    def receiving_events(self) -> bool:
+        return self._listening
+
+    def devices(self) -> list[dict]:
+        """Cameras the account can see. Empty until the driver has connected.
+
+        The shape depends on the schema. Up to 12 the bridge returns device
+        objects; from 13 onwards it replaces them with bare serial numbers
+        (``state.js``: ``devices = Array.from(..., d => d.getSerial())``), so the
+        name and model have to be fetched per device. Both are handled, and a
+        device whose properties cannot be read still comes back with its serial
+        rather than disappearing from the list.
+        """
+        state = self._start_listening().get("state") or {}
+        out: list[dict] = []
+        for item in state.get("devices") or []:
+            if isinstance(item, dict):
+                out.append(item)
+                continue
+            serial = str(item)
+            entry = {"serialNumber": serial, "name": "", "model": ""}
+            try:
+                entry.update(_describe(self.device_properties(serial)))
+            except BridgeError:
+                pass
+            out.append(entry)
+        return out
+
+    def wait_for_devices(self, timeout: float = 60.0, poll: float = 1.5) -> list[dict]:
+        """Devices, once the bridge has actually found them.
+
+        Signing in does not populate them. The client fetches the account's
+        stations and devices from Eufy afterwards, announcing each one as it
+        arrives, so a single start_listening straight after "connected" reliably
+        returns an empty list — which reads as "this account has no cameras" when
+        the truth is "ask again in a moment".
+        """
+        deadline = time.monotonic() + timeout
+        latest: list[dict] = []
+        while time.monotonic() < deadline:
+            latest = self.devices()
+            if any(looks_like_camera(d) for d in latest):
+                return latest
+            time.sleep(poll)
+        return latest
 
     def device_properties(self, serial: str) -> dict:
         result = self.send_wait("device.get_properties", serialNumber=serial)
@@ -274,10 +349,38 @@ def _describe_error(command: str, result: dict) -> str:
     return hints.get(str(code), f"The camera service refused '{command}' ({code}).")
 
 
+def _camera_prefix(serial: str) -> bool:
+    """T8 is Eufy's camera family; T85xx are locks and sensors."""
+    upper = serial.upper()
+    return upper.startswith("T8") and not upper.startswith("T85")
+
+
+def _describe(properties: dict) -> dict:
+    """Pull name and model out of a properties payload.
+
+    Values arrive either bare or wrapped as ``{"value": ...}`` depending on the
+    property and the schema, so both are unwrapped.
+    """
+    def field(key: str) -> str:
+        raw = properties.get(key)
+        if isinstance(raw, dict):
+            raw = raw.get("value")
+        return str(raw or "")
+
+    return {"name": field("name"), "model": field("model")}
+
+
 def looks_like_camera(device: dict) -> bool:
     """Cameras only: the account may also hold locks, sensors and doorbells."""
+    if not isinstance(device, dict):
+        # A bare serial number: schema 13+ hands these back when the properties
+        # could not be read. The serial carries the model prefix, which is enough
+        # to tell a camera from a lock or a sensor.
+        return _camera_prefix(str(device))
     model = str(device.get("model") or "").upper()
     name = str(device.get("name") or "")
+    if not model and not name:
+        return _camera_prefix(str(device.get("serialNumber") or ""))
     if model.startswith("T8") and not model.startswith("T85"):   # T85xx are sensors
         return True
     return "cam" in name.lower()

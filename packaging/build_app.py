@@ -19,6 +19,7 @@ that, but a stable identity is still the better default.)
 from __future__ import annotations
 
 import argparse
+import platform
 import plistlib
 import re
 import shutil
@@ -122,11 +123,19 @@ def info_plist(version: str) -> dict:
 
 
 def build(args) -> Path:
-    if not (RUNTIME / "node" / "bin" / "node").exists():
+    runtime = runtime_for(args.arch)
+    if not (runtime / "node" / "bin" / "node").exists():
         raise SystemExit(
-            "runtime/ is missing. Run: make runtime"
+            f"{runtime.name}/ is missing. Run: make runtime"
+            + (" ARCH=x64" if args.arch == "x86_64" else "")
         )
-    model = _preferred_model()
+    python = venv_python(args.arch)
+    if not python.exists():
+        raise SystemExit(
+            f"No {args.arch} build environment at {python.parent.parent}. "
+            "Run: make setup-x86" if args.arch == "x86_64" else "Run: make setup"
+        )
+    model = _preferred_model(args.model)
     if args.with_onnx and model is None:
         raise SystemExit(
             f"--with-onnx needs a detection model in {ROOT / 'models'}. Run: make model"
@@ -137,16 +146,16 @@ def build(args) -> Path:
     backup = write_build_info(args.version, args.repo, args.key, args.channel)
     try:
         cmd = [
-            str(ROOT / ".venv" / "bin" / "pyinstaller"),
+            str(python.parent / "pyinstaller"),
             "--noconfirm", "--clean", "--windowed",
             "--name", APP_NAME,
             "--osx-bundle-identifier", BUNDLE_ID,
             "--paths", str(SRC),
             # The whole Node + bridge runtime rides along inside Resources.
-            "--add-data", f"{RUNTIME}:runtime",
+            "--add-data", f"{runtime}:runtime",
             # Only the model that will actually load. models/ accumulates every
             # export, and shipping one the app can never reach is pure download.
-            "--add-data", f"{_preferred_model()}:models",
+            "--add-data", f"{_preferred_model(args.model)}:models",
             "--collect-submodules", "surfaceguard",
             "--hidden-import", "surfaceguard.app",
             "--collect-binaries", "av",
@@ -159,7 +168,11 @@ def build(args) -> Path:
         if not args.with_onnx:
             cmd += ["--exclude-module", "onnxruntime"]
 
-        log("running pyinstaller (this takes a few minutes)")
+        if args.arch == "x86_64":
+            # Rosetta translates x86_64 on Apple Silicon, so an Intel build can be
+            # made here. The reverse is not true: nothing runs arm64 on her Mac.
+            cmd = ["/usr/bin/arch", "-x86_64", *cmd]
+        log(f"running pyinstaller for {args.arch} (this takes a few minutes)")
         subprocess.run(cmd, cwd=ROOT, check=True)
     finally:
         restore_build_info(backup)
@@ -204,17 +217,41 @@ def build(args) -> Path:
         log("signature verifies" if verify.returncode == 0
             else f"WARNING: verification failed: {verify.stderr.strip()[:200]}")
 
+    built_arch = subprocess.run(
+        ["/usr/bin/lipo", "-archs", str(app / "Contents" / "MacOS" / APP_NAME)],
+        capture_output=True, text=True).stdout.strip()
+    if args.arch not in built_arch:
+        raise SystemExit(
+            f"asked for {args.arch} but produced {built_arch!r}. "
+            "The build environment is the wrong architecture."
+        )
     size = sum(f.stat().st_size for f in app.rglob("*") if f.is_file())
-    log(f"built {app} ({size / 1e6:.0f} MB)")
+    log(f"built {app} ({size / 1e6:.0f} MB, {built_arch})")
     return app
 
 
-def _preferred_model() -> Path | None:
+def venv_python(arch: str) -> Path:
+    return ROOT / (".venv-x86" if arch == "x86_64" else ".venv") / "bin" / "python"
+
+
+def runtime_for(arch: str) -> Path:
+    """Her Intel Mac cannot run our arm64 Node, so each arch has its own runtime."""
+    return ROOT / ("runtime-x64" if arch == "x86_64" else "runtime")
+
+
+def _preferred_model(only: str = "") -> Path | None:
     """The single model this build should carry.
 
     cat_detector prefers yolov8m, then s, then n, and stops at the first it finds,
     so bundling the others adds megabytes that can never be loaded.
+
+    ``only`` pins a specific one. Intel Macs need it: a 2020 i5 has no Neural
+    Engine, and yolov8m there costs several times the inference budget, while
+    yolov8n stays inside it.
     """
+    if only:
+        candidate = ROOT / "models" / only
+        return candidate if candidate.exists() else None
     for name in ("yolov8m.onnx", "yolov8s.onnx", "yolov8n.onnx"):
         candidate = ROOT / "models" / name
         if candidate.exists():
@@ -245,6 +282,10 @@ def main() -> int:
     ap.add_argument("--identity", default=None, help="override the signing identity")
     ap.add_argument("--with-onnx", action="store_true",
                     help="bundle onnxruntime (needed for real detection)")
+    ap.add_argument("--model", default="",
+                    help="pin one model, e.g. yolov8n.onnx for Intel Macs")
+    ap.add_argument("--arch", choices=["arm64", "x86_64"], default=platform.machine(),
+                    help="which Mac the build is for; x86_64 targets Intel Macs")
     args = ap.parse_args()
 
     if not args.key:

@@ -601,3 +601,64 @@ def test_updates_work_with_no_credential_at_all(monkeypatch):
     health = access.check_token("owner/public-repo")
     assert health.ok, health.reason
     assert "Authorization" not in seen["headers"], "sent a credential it does not have"
+
+
+def test_update_unpacking_preserves_symlinks(tmp_path, monkeypatch):
+    """A .app is full of symlinks — 155 in this one. Python's zipfile writes each
+    as a regular file holding the target path, which silently breaks the code
+    signature; macOS then refuses the update with "code object is not signed at
+    all". The unpacker must use ditto, the same tool that made the archive."""
+    import subprocess
+
+    import surfaceguard.update.updater as mod
+
+    monkeypatch.setattr(mod, "cache_dir", lambda: tmp_path)
+
+    bundle = tmp_path / "src" / "Thing.app" / "Contents" / "MacOS"
+    bundle.mkdir(parents=True)
+    (bundle / "real").write_text("#!/bin/sh\nexit 0\n")
+    (bundle / "link").symlink_to("real")
+    (tmp_path / "src" / "Thing.app" / "Contents" / "Info.plist").write_text(
+        "<?xml version='1.0'?><!DOCTYPE plist PUBLIC '-//Apple//DTD PLIST 1.0//EN' "
+        "'http://www.apple.com/DTDs/PropertyList-1.0.dtd'><plist version='1.0'><dict>"
+        "<key>CFBundleExecutable</key><string>real</string>"
+        "<key>CFBundleIdentifier</key><string>com.test.thing</string></dict></plist>"
+    )
+    (bundle / "real").chmod(0o755)
+    subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-",
+                    str(tmp_path / "src" / "Thing.app")], check=True, capture_output=True)
+
+    archive = tmp_path / "thing.zip"
+    subprocess.run(["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
+                    str(tmp_path / "src" / "Thing.app"), str(archive)], check=True)
+
+    updater = mod.Updater(repo="x/y", public_key="", current_version="0.1.0")
+    staged = updater._unpack(archive.read_bytes(),
+                             mod.Release(version="0.2.0", sha256="", size=0,
+                                         asset_name="thing.zip", asset_id=1))
+    assert (staged / "Contents" / "MacOS" / "link").is_symlink(), "symlink was flattened"
+    assert subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(staged)],
+        capture_output=True,
+    ).returncode == 0, "the unpacked bundle no longer verifies"
+
+
+def test_device_list_handles_serial_only_entries():
+    """Schema 13+ replaces device objects with bare serial numbers
+    (state.js: devices = Array.from(..., d => d.getSerial())). Calling .get() on
+    those produced "'str' object has no attribute 'get'" at the camera-picking
+    step — the first point the app ever reached a real account."""
+    from surfaceguard.bridge.client import _describe, looks_like_camera
+
+    assert looks_like_camera("T8417P1234567890"), "a camera serial must be offered"
+    assert not looks_like_camera("T8520P0000000000"), "a lock must not be"
+    assert looks_like_camera({"serialNumber": "T8417P1", "name": "", "model": ""})
+    assert looks_like_camera({"model": "T8417", "name": "Kitchen"})
+    assert not looks_like_camera({"model": "T8520", "name": "Front door"})
+
+    # Properties arrive bare or wrapped depending on schema and property.
+    assert _describe({"name": {"value": "Kitchen"}, "model": {"value": "T8417"}}) == {
+        "name": "Kitchen", "model": "T8417"}
+    assert _describe({"name": "Kitchen", "model": "T8417"}) == {
+        "name": "Kitchen", "model": "T8417"}
+    assert _describe({}) == {"name": "", "model": ""}

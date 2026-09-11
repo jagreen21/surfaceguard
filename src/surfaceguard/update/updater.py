@@ -311,13 +311,25 @@ class Updater:
         archive.write_bytes(blob)
         extract = work / "extracted"
         extract.mkdir()
+
+        # Check for path traversal before anything is written...
         with zipfile.ZipFile(archive) as zf:
             for member in zf.namelist():
-                # Refuse path traversal before writing anything.
                 target = (extract / member).resolve()
                 if not str(target).startswith(str(extract.resolve())):
                     raise RuntimeError(f"the update archive contains an unsafe path: {member}")
-            zf.extractall(extract)
+
+        # ...then unpack with ditto, not zipfile. An .app bundle is full of
+        # symlinks, and Python's zipfile writes each one as a regular file holding
+        # the target path. That silently breaks the code signature, and macOS then
+        # refuses the update with "code object is not signed at all". ditto is what
+        # made the archive and is what has to open it.
+        result = subprocess.run(
+            ["/usr/bin/ditto", "-x", "-k", str(archive), str(extract)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"could not unpack the update ({result.stderr.strip()[:160]})")
         archive.unlink(missing_ok=True)
 
         apps = [p for p in extract.rglob("*.app") if p.is_dir()]

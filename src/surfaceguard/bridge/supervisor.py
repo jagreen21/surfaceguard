@@ -32,6 +32,17 @@ logger = get_logger("bridge")
 
 LISTENING_MARKER = "server listening"
 
+# The bridge prints this per failed P2P attempt. A burst of them means the camera
+# is not reachable on the network, which is a different problem from a bad password
+# and deserves different words.
+P2P_FAILURE_MARKER = "send cam check - error"
+P2P_FAILURES_BEFORE_REPORTING = 5
+
+# Lines worth keeping even though the bridge logs them at INFO.
+NOTABLE_MARKERS = (
+    "captcha", "verify code", "2fa", "login", "locked", "session", "logged in",
+)
+
 START_TIMEOUT_S = 45.0
 BACKOFF_S = (2.0, 5.0, 15.0, 30.0, 60.0)
 LOG_LINES = 400
@@ -87,6 +98,7 @@ def free_port(preferred: int = 3050) -> int:
 class BridgeStatus:
     running: bool = False
     listening: bool = False
+    lan_unreachable: bool = False
     port: int = 0
     pid: int | None = None
     restarts: int = 0
@@ -110,6 +122,7 @@ class BridgeSupervisor:
         self._thread: threading.Thread | None = None
         self._logs: deque[str] = deque(maxlen=LOG_LINES)
         self._listening = threading.Event()
+        self._p2p_failures = 0
         self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ paths
@@ -214,9 +227,12 @@ class BridgeSupervisor:
                 cwd=str(self.work_dir),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,
-                # Detach from our process group so a Ctrl-C in a dev terminal does
-                # not take the bridge down independently of the supervisor.
-                start_new_session=True,
+                # Deliberately NOT start_new_session=True. setsid() makes the bridge
+                # its own responsible process for macOS privacy, so it stops
+                # inheriting the app's Local Network permission — and the Eufy
+                # cameras are on the LAN. The symptom is not a permission dialog but
+                # a stream of "[p2p] Send cam check - Error": the user allowed local
+                # network access for Surface Guard, and node was never covered by it.
             )
         except OSError as exc:
             config.unlink(missing_ok=True)
@@ -243,8 +259,21 @@ class BridgeSupervisor:
             text = _strip_ansi(line.rstrip())
             if text:
                 self._logs.append(text)
-                if "ERROR" in text or "FATAL" in text:
+                if P2P_FAILURE_MARKER in text.lower():
+                    self._p2p_failures += 1
+                    if self._p2p_failures == P2P_FAILURES_BEFORE_REPORTING:
+                        self.status.lan_unreachable = True
+                        logger.error(
+                            "the camera is not answering on the local network "
+                            "(%d p2p failures)", self._p2p_failures,
+                        )
+                elif "ERROR" in text or "FATAL" in text:
                     logger.error("bridge: %s", text[:300])
+                elif any(word in text.lower() for word in NOTABLE_MARKERS):
+                    # Login progress is INFO, not ERROR, so the old filter dropped
+                    # it — including "captcha required", which was the entire reason
+                    # sign-in was failing and never appeared in a single log.
+                    logger.info("bridge: %s", text[:300])
             if not cleaned and LISTENING_MARKER in text.lower():
                 self.status.listening = True
                 self.status.message = f"Camera service running on port {self.port}"

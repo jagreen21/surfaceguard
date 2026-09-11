@@ -11,3 +11,4 @@ build/
 *.spec
 models/*.onnx
 tests/assets/
+runtime-x64/

@@ -244,3 +244,190 @@ def test_every_heading_and_label_exists_for_every_page(qt_app):
         assert dialog.heading.text(), f"{page.name} has no heading"
         assert dialog.subtitle.text(), f"{page.name} has no subtitle"
         assert dialog.next_btn.text(), f"{page.name} has no button label"
+
+
+def test_sign_in_does_not_wait_on_the_meaningless_acknowledgement(monkeypatch):
+    """driver.connect answers success:true even when the sign-in fails, so waiting
+    on that result only added a 15s deadline to a login that legitimately takes
+    longer — abandoning a sign-in that was still working. The outcome must come
+    from the event, and only the event."""
+    import inspect
+
+    from surfaceguard.bridge.client import BridgeClient
+
+    source = inspect.getsource(BridgeClient.connect_driver)
+    assert 'send_wait("driver.connect"' not in source
+    assert 'self.send("driver.connect")' in source
+
+
+def test_a_captcha_challenge_reaches_the_user(qt_app, no_keychain):
+    """The failure that cost a whole evening: Eufy demanded a captcha, the bridge
+    forwarded it, and it had to show up as a step rather than a timeout."""
+    from surfaceguard.bridge.client import BridgeClient
+
+    dialog = OnboardingDialog(allow_demo=True)
+    client = BridgeClient("ws://127.0.0.1:1")
+    client.add_handler(lambda e: None)
+    # Exactly the shape eufy-security-ws sends.
+    client._dispatch({
+        "type": "event",
+        "event": {
+            "source": "driver",
+            "event": "captcha request",
+            "captchaId": "abc123",
+            "captcha": "data:image/png;base64,aGVsbG8=",
+        },
+    })
+    assert client.driver.phase.value == "needs_captcha"
+    assert client.driver.captcha_id == "abc123"
+
+    dialog._on_signin_settled(client.driver)
+    assert dialog.page is Page.CHALLENGE
+    assert not dialog.captcha_image.isHidden()
+    assert Page.CHALLENGE in dialog.route(), "the captcha must count as a step"
+
+
+def test_the_client_subscribes_to_events_before_it_signs_in():
+    """The bug that cost an evening. The bridge gates every event on a per-client
+    receiveEvents flag that only start_listening sets, so calling driver.connect
+    first means the captcha request, the connected event and the connection error
+    are all delivered to nobody — and sign-in can only ever time out."""
+    import inspect
+
+    from surfaceguard.bridge.client import BridgeClient
+
+    connect = inspect.getsource(BridgeClient.connect)
+    assert "_start_listening" in connect, "connect() must subscribe to events"
+    assert connect.index("set_api_schema") < connect.index("_start_listening")
+
+    # And nothing may send driver.connect before that subscription exists.
+    driver = inspect.getsource(BridgeClient.connect_driver)
+    assert "start_listening" not in driver
+
+
+def test_a_successful_sign_in_is_remembered_before_setup_finishes(qt_app, no_keychain,
+                                                                  tmp_path, monkeypatch):
+    """The password lives in the Keychain and survives updates, but without the
+    email and region stored beside it an update before choosing a camera meant
+    typing everything again."""
+    from surfaceguard.bridge.client import DriverPhase, DriverState
+    from surfaceguard.storage import preferences as prefs_mod
+
+    monkeypatch.setattr(prefs_mod, "support_dir", lambda: tmp_path)
+    dialog = OnboardingDialog(allow_demo=True)
+    dialog.account.username = "her@example.com"
+    dialog.account.country = "GB"
+    dialog._remember_account()
+
+    saved = prefs_mod.Preferences.load().camera
+    assert saved["kind"] == "eufy"
+    assert saved["username"] == "her@example.com"
+    assert saved["country"] == "GB"
+
+
+class _LiveClient:
+    """A bridge client that is already connected and signed in."""
+
+    connected = True
+
+    def __init__(self):
+        from surfaceguard.bridge.client import DriverPhase, DriverState
+
+        self.driver = DriverState(phase=DriverPhase.CONNECTED, message="Signed in")
+        self.closed = False
+
+    def devices(self):
+        return [{"name": "Kitchen", "model": "T8417", "serialNumber": "T8417P1"}]
+
+    def wait_for_devices(self, timeout=60.0, poll=1.5):
+        return self.devices()
+
+    def close(self):
+        self.closed = True
+
+
+class _LiveSupervisor:
+    def __init__(self):
+        from surfaceguard.bridge.supervisor import BridgeStatus
+
+        self.status = BridgeStatus(running=True, listening=True, port=3050)
+        self.stopped = False
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_reopening_setup_does_not_ask_her_to_sign_in_again(qt_app, no_keychain):
+    """Closing setup used to discard the signed-in session, so coming back meant
+    typing the password again while the bridge was still connected."""
+    dialog = OnboardingDialog(allow_demo=True, supervisor=_LiveSupervisor(),
+                              client=_LiveClient())
+    assert dialog.resumed
+    assert dialog.page is Page.PICKER, "it should resume at choosing a camera"
+    assert Page.CREDENTIALS not in dialog.route() or dialog.page is not Page.CREDENTIALS
+
+
+def test_closing_setup_leaves_a_signed_in_bridge_running(qt_app, no_keychain):
+    """The app hands it back next time; stopping it here is what forced the
+    second sign-in."""
+    supervisor = _LiveSupervisor()
+    dialog = OnboardingDialog(allow_demo=True, supervisor=supervisor, client=_LiveClient())
+    dialog.reject()
+    assert not supervisor.stopped, "a live sign-in was thrown away on close"
+
+
+def test_a_dead_bridge_is_not_treated_as_signed_in(qt_app, no_keychain):
+    """Only a genuinely healthy bridge may skip the sign-in step."""
+    from surfaceguard.bridge.supervisor import BridgeStatus
+
+    supervisor = _LiveSupervisor()
+    supervisor.status = BridgeStatus(running=False, listening=False)
+    dialog = OnboardingDialog(allow_demo=True, supervisor=supervisor, client=_LiveClient())
+    assert not dialog.resumed
+    assert dialog.page is Page.KIND
+
+
+class _FakeCamera:
+    def __init__(self):
+        self.stopped = False
+
+    def stop(self):
+        self.stopped = True
+
+    def read(self, timeout=0):
+        return None
+
+
+def test_picking_a_different_camera_stops_the_first_stream(qt_app, no_keychain):
+    """Eufy serves one livestream at a time. Starting a second without stopping the
+    first leaves her watching a picture that never arrives — which is exactly the
+    "try each until I find the right one" flow."""
+    dialog = OnboardingDialog(allow_demo=True)
+    first = _FakeCamera()
+    dialog.source = first
+    dialog.chosen = {"name": "Kitchen", "serialNumber": "T8417P1"}
+    dialog._go(Page.CONFIRM)
+    dialog._back()
+    assert first.stopped, "the first camera kept streaming"
+    assert dialog.source is None and dialog.chosen is None
+    assert dialog.page is Page.PICKER
+
+
+def test_the_preview_says_which_camera_it_is(qt_app, no_keychain):
+    """With three cameras on the account, "is this the right one?" needs a name."""
+    dialog = OnboardingDialog(allow_demo=True)
+    dialog.chosen = {"name": "Kitchen", "serialNumber": "T8417P1", "model": "T8417"}
+    dialog._go(Page.CONFIRM)
+    assert "Kitchen" in dialog.heading.text()
+    assert "Back" in dialog.subtitle.text()
+
+
+def test_the_picker_shows_friendly_model_names(qt_app, no_keychain):
+    dialog = OnboardingDialog(allow_demo=True)
+    dialog._show_devices([
+        {"name": "Kitchen", "model": "T8417", "serialNumber": "T8417P1234567890"},
+        {"name": "", "model": "T8416", "serialNumber": "T8416P0987654321"},
+    ])
+    rows = [dialog.devices.item(i).text() for i in range(dialog.devices.count())]
+    assert any("Kitchen" in r and "Indoor Cam E30" in r for r in rows)
+    assert any("(unnamed camera)" in r for r in rows), "an unnamed camera must still be pickable"

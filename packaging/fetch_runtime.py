@@ -65,13 +65,21 @@ def _expected_sha(version: str, filename: str) -> str:
     raise RuntimeError(f"{filename} is not listed in Node's SHASUMS256.txt for v{version}")
 
 
+_arch_override = ""
+
+
+def runtime_dir(arch: str = "") -> Path:
+    """Each architecture gets its own runtime; her Intel Mac cannot run ours."""
+    return RUNTIME if not arch else ROOT / f"runtime-{arch}"
+
+
 def fetch_node(force: bool = False) -> Path:
     node_bin = NODE_DIR / "bin" / "node"
     if node_bin.exists() and not force:
         _log(f"node already present: {NODE_DIR}")
         return NODE_DIR
 
-    arch = "arm64" if os.uname().machine == "arm64" else "x64"
+    arch = _arch_override or ("arm64" if os.uname().machine == "arm64" else "x64")
     name = f"node-v{NODE_VERSION}-darwin-{arch}"
     filename = f"{name}.tar.gz"
     url = f"{BASE}/v{NODE_VERSION}/{filename}"
@@ -188,7 +196,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true", help="verify without downloading")
     ap.add_argument("--force", action="store_true", help="re-fetch even if present")
+    ap.add_argument("--arch", choices=["arm64", "x64"], default="",
+                    help="which Mac this runtime is for; defaults to this machine")
     args = ap.parse_args()
+
+    global _arch_override, RUNTIME, NODE_DIR, BRIDGE_DIR
+    if args.arch:
+        _arch_override = args.arch
+        RUNTIME = runtime_dir(args.arch)
+        NODE_DIR = RUNTIME / "node"
+        BRIDGE_DIR = RUNTIME / "bridge"
     if args.check:
         return check()
     print(f"Fetching runtime into {RUNTIME}")
