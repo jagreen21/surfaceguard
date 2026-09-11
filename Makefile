@@ -7,12 +7,13 @@
 #   make model     export the detector
 #   make app       build Surface Guard.app
 #   make release   build, sign and publish   (VERSION=1.0.0)
+#   make installer build the AirDroppable .dmg  (TOKEN=github_pat_... optional)
 
 PY := .venv/bin/python
 PIP := .venv/bin/pip
 VERSION ?= 0.0.0
 
-.PHONY: setup test run runtime model app release check clean doctor
+.PHONY: setup test run runtime model app release installer check clean doctor
 
 $(PY):
 	python3 -m venv .venv
@@ -44,6 +45,9 @@ app: setup
 release: setup
 	@test "$(VERSION)" != "0.0.0" || (echo "set VERSION, e.g. make release VERSION=1.0.0"; exit 1)
 	$(PY) packaging/make_release.py --version $(VERSION) --with-onnx
+
+installer: setup
+	$(PY) packaging/make_installer.py $(if $(TOKEN),--token $(TOKEN),)
 
 check: setup
 	"dist/Surface Guard.app/Contents/MacOS/Surface Guard" --demo --selftest /tmp/check.png

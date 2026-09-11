@@ -1087,13 +1087,22 @@ def set_launch_at_login(enabled: bool, executable: str | None = None) -> bool:
                        capture_output=True, check=False)
         return False
     LAUNCH_AGENT.parent.mkdir(parents=True, exist_ok=True)
-    argv = [executable or sys.executable, "-m", "surfaceguard.app", "--background"]
+    binary = executable or sys.executable
+    if getattr(sys, "frozen", False):
+        # In a bundle sys.executable *is* the app. Passing "-m surfaceguard.app"
+        # to it makes argparse reject an unknown "-m", so login start fails with
+        # nothing on screen to say why.
+        argv = [binary, "--background"]
+        working = str(Path.home())
+    else:
+        argv = [binary, "-m", "surfaceguard.app", "--background"]
+        working = str(Path(__file__).resolve().parent.parent)
     LAUNCH_AGENT.write_bytes(plistlib.dumps({
         "Label": "com.surfaceguard.app",
         "ProgramArguments": argv,
         "RunAtLoad": True,
         "KeepAlive": False,
-        "WorkingDirectory": str(Path(__file__).resolve().parent.parent),
+        "WorkingDirectory": working,
     }))
     subprocess.run(["launchctl", "load", str(LAUNCH_AGENT)], capture_output=True, check=False)
     return True

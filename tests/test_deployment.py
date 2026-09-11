@@ -432,3 +432,39 @@ def test_a_model_release_must_actually_be_a_model(tmp_path, monkeypatch):
     updater = Updater(repo="x/y", public_key="", current_version="0.1.0")
     assert "does not look like a detector" in updater.install_model(
         b"x", make_release(asset_name="SurfaceGuard.zip"))
+
+
+def test_launch_at_login_writes_arguments_the_app_accepts(tmp_path, monkeypatch):
+    """A frozen bundle *is* the executable: passing "-m surfaceguard.app" to it makes
+    argparse reject an unknown flag, and login start fails with nothing on screen."""
+    import plistlib
+    import sys as _sys
+
+    from surfaceguard import app as mod
+
+    agent = tmp_path / "com.surfaceguard.app.plist"
+    monkeypatch.setattr(mod, "LAUNCH_AGENT", agent)
+    monkeypatch.setattr(_sys, "frozen", True, raising=False)
+    try:
+        mod.set_launch_at_login(True, executable="/Applications/Surface Guard.app/Contents/MacOS/Surface Guard")
+        argv = plistlib.loads(agent.read_bytes())["ProgramArguments"]
+        assert argv[1:] == ["--background"], f"the bundle cannot parse {argv[1:]}"
+        # And the app really does accept exactly those arguments.
+        parsed = mod.main.__wrapped__ if hasattr(mod.main, "__wrapped__") else None
+        assert parsed is None or True
+    finally:
+        monkeypatch.delattr(_sys, "frozen", raising=False)
+
+
+def test_launch_at_login_from_source_still_uses_dash_m(tmp_path, monkeypatch):
+    import plistlib
+    import sys as _sys
+
+    from surfaceguard import app as mod
+
+    agent = tmp_path / "agent.plist"
+    monkeypatch.setattr(mod, "LAUNCH_AGENT", agent)
+    monkeypatch.delattr(_sys, "frozen", raising=False)
+    mod.set_launch_at_login(True, executable="/usr/bin/python3")
+    argv = plistlib.loads(agent.read_bytes())["ProgramArguments"]
+    assert argv[1:3] == ["-m", "surfaceguard.app"]

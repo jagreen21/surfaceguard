@@ -429,7 +429,48 @@ def write_report(r: Results, room, out_dir: Path, source_label: str) -> Path:
     return report
 
 
+def source_from_settings() -> tuple[CameraSource, str]:
+    """Use the camera setup already saved by the app.
+
+    Without this, running against a real camera means assembling a bridge URL and a
+    device serial by hand — facts that only exist *after* setup has run, which made
+    the harness awkward to reach at exactly the moment it is useful.
+    """
+    from surfaceguard.bridge.client import BridgeClient
+    from surfaceguard.bridge.credentials import EufyAccount
+    from surfaceguard.bridge.supervisor import BridgeSupervisor
+    from surfaceguard.camera.sources.eufy_bridge import EufyBridgeCamera
+    from surfaceguard.storage.preferences import Preferences
+
+    config = Preferences.load().camera or {}
+    if config.get("kind") != "eufy":
+        raise SystemExit(
+            "No Eufy camera is set up yet. Open Surface Guard and finish setup first, "
+            "or pass --source and --url explicitly."
+        )
+
+    account = EufyAccount(username=str(config.get("username", "")),
+                          country=str(config.get("country", "US")))
+    supervisor = BridgeSupervisor(account)
+    status = supervisor.start(wait=True)
+    if not status.listening:
+        raise SystemExit(f"The camera service did not start: {status.fatal or status.message}")
+
+    client = BridgeClient(supervisor.url)
+    client.connect()
+    state = client.connect_driver()
+    if state.phase.value != "connected":
+        raise SystemExit(f"Could not sign in to Eufy: {state.message}")
+
+    source = EufyBridgeCamera(client=client, serial=str(config.get("serial", "")),
+                              model=str(config.get("model", "")),
+                              name=str(config.get("name", "")), owns_client=True)
+    return source, f"{config.get('name') or 'Eufy camera'} ({config.get('model', '?')})"
+
+
 def build_source(args) -> tuple[CameraSource, str]:
+    if getattr(args, "from_settings", False):
+        return source_from_settings()
     if args.source == "synthetic":
         from surfaceguard.camera.sources.synthetic import SyntheticCamera
         return SyntheticCamera(backlash_px=args.backlash, latency_s=0.28), "Synthetic room"
@@ -445,6 +486,9 @@ def build_source(args) -> tuple[CameraSource, str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Surface Guard Phase 0 feasibility harness")
+    ap.add_argument("--from-settings", action="store_true",
+                    help="use the camera the app already has set up — the usual way "
+                         "to run this against a real camera")
     ap.add_argument("--source", default="synthetic",
                     choices=["synthetic", "eufy", "rtsp", "replay"])
     ap.add_argument("--url", default="ws://127.0.0.1:3000",

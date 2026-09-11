@@ -8,33 +8,6 @@ her Mac, once.
 
 ---
 
-## 0. Before anything else: does her camera work?
-
-This has never been tested against a real E30. Run it before you rely on any of
-the rest — it takes about two minutes and can still invalidate the design.
-
-You will need the bridge running against her Eufy account. The easiest way is to
-finish setup once on **your** Mac (section 2), then:
-
-```bash
-.venv/bin/python tools/phase0.py --source eufy --url ws://127.0.0.1:3050
-```
-
-It writes `phase0-out/phase0-report.md` with a **GO / NO-GO** verdict covering
-stream startup, registration across the pan range, return-to-position
-repeatability, whether the camera's own speaker is reachable, end-to-end latency
-and reconnection.
-
-Two answers change the plan:
-
-- **Camera speaker reachable?** If yes, the deterrent plays from the camera and
-  her laptop stops mattering. If no, the sound comes from the MacBook, and a
-  closed lid or a muted machine is a silent failure.
-- **Capture latency.** If it is above about a second on its own, deterrence will
-  not work and the design needs revisiting, not the UI.
-
----
-
 ## 1. On your Mac
 
 ### 1.1 Make the update token
@@ -96,72 +69,76 @@ identical to a healthy app from the outside.
 
 ---
 
-## 2. On her Mac, once
+## 2. Make the thing you AirDrop
 
-Bring the `.app` on a USB stick, over AirDrop, or from the release page.
+```bash
+make installer                      # or: make installer TOKEN=github_pat_...
+```
 
-### 2.1 Put it in the right place
+That produces `dist/SurfaceGuard-<version>-Installer.dmg` — the app, a one-click
+installer, and a short read-me. **AirDrop that one file.**
 
-Drag it to **`~/Applications`** — her home folder, *not* `/Applications`.
+Passing `TOKEN=` stores the update token on her Mac during install, so updates work
+without anyone touching Settings. The image then contains a credential: delete it
+once she has it, and do not leave it in Downloads.
 
-This matters: the app replaces its own bundle when it updates, which needs write
-access to the containing folder. In `/Applications` every update would ask for an
-admin password, which is exactly the kind of thing nobody does.
+## 3. On her Mac, once
 
-### 2.2 Let it open
+She opens the image and double-clicks **Install Surface Guard**.
 
-The app is signed but not notarised, so Gatekeeper will block the first launch.
-Either:
+macOS will refuse the first time — it cannot check an app that did not come from
+the App Store. She right-clicks **Install Surface Guard**, chooses **Open**, then
+**Open** again. Once, on a short shell script she can read, rather than on a 500 MB
+application.
 
-- **Right-click the app → Open → Open** (the button only appears on right-click), or
-- from your terminal: `xattr -dr com.apple.quarantine ~/Applications/"Surface Guard.app"`
+The installer then does the rest by itself:
 
-Once only. Updates afterwards install silently, because files the app downloads
-itself are not quarantined the way browser downloads are.
+- closes any running copy
+- copies the app to `~/Applications` (the right place — it replaces its own bundle
+  when updating, and `/Applications` would demand an admin password every time)
+- clears the quarantine flag AirDrop sets, so the app itself never needs a bypass
+- turns on start-at-login
+- stores the update token, if you baked one in
+- opens the app
 
-### 2.3 Say yes to Local Network
+### The two steps it cannot do
 
-macOS will ask whether Surface Guard may find devices on the local network. **It
-must be allowed** — the camera is on the Wi-Fi, and without this the app simply
-never finds it and cannot say why.
+macOS does not allow either to be automated, and pretending otherwise is how
+someone ends up staring at an app that silently never finds the camera.
 
-If it was dismissed: System Settings → Privacy & Security → Local Network → enable
-Surface Guard.
+**Allow Local Network.** macOS asks whether Surface Guard may find devices on the
+local network. It must be allowed — the camera is on the Wi-Fi. If the prompt was
+dismissed: System Settings → Privacy & Security → Local Network → enable Surface
+Guard.
 
-### 2.4 Have these ready before you start setup
+**Sign in to Eufy.** The password goes into the Keychain through the app's own
+sign-in. An installer that asked for it would be teaching her to type her password
+into whatever asks.
 
-- Her **Eufy account email and password** — the same ones she uses in the Eufy app
+### Have these ready before she starts
+
+- Her **Eufy account email and password** — the same as the Eufy app
 - Her **region** (the account is region-locked; the wrong one fails confusingly)
 - Access to that **email inbox**, in case Eufy sends a verification code
 
-### 2.5 Run setup
+### Setup itself
 
 Seven steps, or eight if Eufy asks for a code. The app counts them honestly.
 
 1. **Connect your camera** — choose *A Eufy camera*
 2. **Sign in to Eufy** — email, password, region
-3. *(only if asked)* **One more check** — the code Eufy emails, or a captcha
+3. *(only if asked)* **One more check** — the emailed code, or a captcha
 4. **Choose your camera** — the one pointing at the counter
-5. **Is this the right camera?** — a still from it. Aim it now and leave it there.
+5. **Is this the right camera?** — aim it now and leave it there
 6. **Looking around the room** — it pans slowly and stitches one wide picture,
-   about 15 seconds. Surfaces get drawn on this once and work from any angle.
-7. **Check you can hear it** — play the deterrent. Turn the volume up now.
-8. **Draw your first surface** — click around the edge of the counter, press Enter,
-   name it.
+   about 15 seconds. Surfaces are drawn on this once and work from any angle.
+7. **Check you can hear it** — turn the volume up now
+8. **Draw your first surface** — click round the edge of the counter, press Enter,
+   name it
 
 Then **Turn protection on**.
 
-### 2.6 Finish the settings
-
-In **Settings**:
-
-- Paste the update token into *Automatic updates* and press **Check for updates now**.
-  It should say *"Update access is working (N days until the token expires)"*.
-- Tick **Open Surface Guard automatically when this Mac starts**.
-
----
-
-## 3. What to tell her
+## 4. What to tell her
 
 - It lives in the **menu bar**. Closing the window does not stop it.
 - The dot is the status: green guarding, grey off or paused, red **not** protecting.
@@ -171,7 +148,7 @@ In **Settings**:
 - If it ever misbehaves: **Diagnostics → Copy diagnostics**, and paste that to you.
   It contains no passwords or tokens.
 
-## 4. When something breaks and you are not there
+## 5. When something breaks and you are not there
 
 Logs are at `~/Library/Logs/SurfaceGuard/`. **Diagnostics → Show log files** opens
 the folder, **Copy diagnostics** puts a summary on the clipboard.
@@ -182,7 +159,34 @@ service dies, the headline changes to **"Not protecting"** with the reason and
 something to do about it — and it pushes a notification rather than waiting to be
 noticed.
 
-## 5. Shipping her an update later
+## 6. Checking the camera properly (optional)
+
+There is a harness that measures what casual use does not: how far the camera
+lands from where it was asked to return, whether registration holds across the
+*whole* pan range, whether angle hints matter, and recovery from a deliberately
+interrupted stream.
+
+It needs the app set up first — it uses that camera — so it is not a first step:
+
+```bash
+.venv/bin/python tools/phase0.py --from-settings
+```
+
+It writes `phase0-out/phase0-report.md` with a **GO / NO-GO** verdict.
+
+You do not need this to install or run anything. Reach for it when something is
+off and you want numbers instead of impressions, or if you want the two answers
+that would change the design rather than the settings:
+
+- **Is the camera's own speaker reachable?** If so the deterrent can play from the
+  camera, and her laptop stops being on the critical path at all.
+- **Is capture latency under a second?** Above that, a startle cue lands too late
+  to mean anything, and that is a design problem rather than a tuning one.
+
+Both also show up in the app's own **Diagnostics** screen once it is running, which
+is usually enough.
+
+## 7. Shipping her an update later
 
 ```bash
 .venv/bin/python packaging/make_release.py --version 1.0.1 --with-onnx        # the whole app
