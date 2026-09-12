@@ -124,6 +124,7 @@ class Engine:
         with self._lock:
             self.room_map = room_map
             room_map.install_into(self.registrar)
+            self._prefer_surface_keyframes()
             self.state.has_map = True
             self._last_replan = 0.0
 
@@ -132,7 +133,23 @@ class Engine:
             self.prefs.surfaces = surfaces
             self.state.has_surfaces = bool(surfaces)
             self.policy.reset()
+            self._prefer_surface_keyframes()
             self._last_replan = 0.0
+
+    def _prefer_surface_keyframes(self) -> None:
+        """Anchor angleless Eufy registration to tiles with protected surfaces."""
+        if self.room_map is None:
+            self.registrar.prefer_keyframes([])
+            return
+        keyframe_ids = []
+        for surface in self.prefs.surfaces:
+            if not surface.enabled or len(surface.polygon) == 0:
+                continue
+            centre = np.asarray(surface.polygon, float).mean(axis=0)
+            key_id = self.room_map.keyframe_at((float(centre[0]), float(centre[1])))
+            if key_id is not None:
+                keyframe_ids.append(key_id)
+        self.registrar.prefer_keyframes(keyframe_ids)
 
     # -------------------------------------------------------------- lifecycle
 

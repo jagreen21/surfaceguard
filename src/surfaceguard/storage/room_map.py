@@ -11,6 +11,8 @@ import numpy as np
 from ..camera.panorama import MapKeyframe, RoomMap
 from .preferences import support_dir, write_json_atomic
 
+ROOM_MAP_FORMAT = 2  # v2 is the undistorted tiled atlas
+
 
 def map_dir() -> Path:
     d = support_dir() / "room_map"
@@ -22,7 +24,12 @@ def save_room_map(room: RoomMap, directory: Path | None = None) -> Path:
     d = directory or map_dir()
     d.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(d / "canvas.png"), room.canvas)
-    meta = {"built_at": room.built_at, "source_name": room.source_name, "keyframes": []}
+    meta = {
+        "format_version": ROOM_MAP_FORMAT,
+        "built_at": room.built_at,
+        "source_name": room.source_name,
+        "keyframes": [],
+    }
     for kf in room.keyframes:
         cv2.imwrite(str(d / f"{kf.id}.jpg"), kf.image, [cv2.IMWRITE_JPEG_QUALITY, 92])
         meta["keyframes"].append({
@@ -41,10 +48,15 @@ def load_room_map(directory: Path | None = None) -> RoomMap | None:
     meta_path, canvas_path = d / "map.json", d / "canvas.png"
     if not (meta_path.exists() and canvas_path.exists()):
         return None
+    meta = json.loads(meta_path.read_text())
+    # Old full-turn homography maps contain the triangular fragments this format
+    # replaced. Never silently reuse one after the app updates; setup will ask for
+    # a fresh scan and produce clean rectangular tiles.
+    if int(meta.get("format_version", 1)) != ROOM_MAP_FORMAT:
+        return None
     canvas = cv2.imread(str(canvas_path))
     if canvas is None:
         return None
-    meta = json.loads(meta_path.read_text())
     keyframes: list[MapKeyframe] = []
     for entry in meta.get("keyframes", []):
         image = cv2.imread(str(d / f"{entry['id']}.jpg"))

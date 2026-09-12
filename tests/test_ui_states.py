@@ -29,3 +29,23 @@ def test_attention_and_alert_states_are_representable():
 def test_setup_copy_distinguishes_camera_connection_from_room_scan():
     assert "Connect your camera" in StateStore().state().detail
     assert "Scan this room" in StateStore(has_camera=True).state().detail
+
+
+def test_room_map_can_be_zoomed_and_reset(qt_app):
+    import numpy as np
+
+    from surfaceguard.ui.surface_editor import MapCanvas
+
+    canvas = MapCanvas()
+    canvas.resize(800, 600)
+    canvas.set_map(np.zeros((900, 1600, 3), np.uint8))
+    canvas.show()
+    qt_app.processEvents()
+    assert not canvas.grab().isNull()
+    fitted, _ = canvas._fit()
+    canvas.zoom_in()
+    zoomed, _ = canvas._fit()
+    assert zoomed > fitted
+    canvas.reset_view()
+    reset, _ = canvas._fit()
+    assert reset == fitted

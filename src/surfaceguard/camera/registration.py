@@ -88,6 +88,7 @@ class Registrar:
         self.angle_window = angle_window
         self.keyframes: list[Keyframe] = []
         self._last_keyframe_id: str | None = None
+        self._preferred_keyframe_ids: list[str] = []
 
     # ------------------------------------------------------------- keyframes
 
@@ -121,6 +122,14 @@ class Registrar:
     def clear(self) -> None:
         self.keyframes.clear()
         self._last_keyframe_id = None
+        self._preferred_keyframe_ids = []
+
+    def prefer_keyframes(self, keyframe_ids: list[str]) -> None:
+        """Try atlas tiles containing protected surfaces before other views."""
+        known = {kf.id for kf in self.keyframes}
+        self._preferred_keyframe_ids = [
+            key_id for key_id in dict.fromkeys(keyframe_ids) if key_id in known
+        ]
 
     # ------------------------------------------------------------- the fit
 
@@ -148,11 +157,14 @@ class Registrar:
                 best = result
             if result.ok:
                 # A camera-reported angle makes the nearest successful keyframe
-                # a trustworthy prior. The E30 does not report angles while its
-                # own motion tracker steers, so a merely adequate match must not
-                # beat a much stronger keyframe later in the full-room map.
+                # a trustworthy prior. When Eufy's tracker supplies no angle, a
+                # tile containing a protected surface is also preferred so an
+                # adjacent duplicate view cannot hide the user's drawn zone.
                 strong = result.inliers >= max(60, self.min_inliers * 2)
-                if pan is not None or strong:
+                protected_view = (
+                    pan is None and kf.id in self._preferred_keyframe_ids
+                )
+                if pan is not None or strong or protected_view:
                     self._last_keyframe_id = kf.id
                     return result
 
@@ -185,6 +197,12 @@ class Registrar:
             ]
             for kf in sorted(near, key=lambda k: abs((k.pan or 0.0) - pan)):
                 push(kf)
+        else:
+            for key_id in self._preferred_keyframe_ids:
+                for kf in self.keyframes:
+                    if kf.id == key_id:
+                        push(kf)
+                        break
         for kf in self.keyframes:
             if kf.id == self._last_keyframe_id:
                 push(kf)

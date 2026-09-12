@@ -1,15 +1,15 @@
 """The visual surface editor — the core feature.
 
-Surfaces are drawn on the stitched room map, not on a live frame, so a shape is
-drawn once and stays correct from every angle the camera can reach (D2). The live
-preview then shows the same polygon projected into the current frame, which is
-literally what the gates will test.
+Surfaces are drawn on an undistorted room-view atlas. Each tile is a real camera
+frame rather than a warped panorama fragment, so counters and tables stay large
+enough to outline. The live preview shows the polygon projected into the current
+frame, which is literally what the gates will test.
 """
 
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -37,11 +37,7 @@ MIN_POINTS = 3
 
 
 class MapCanvas(QWidget):
-    """Pans/zooms nothing — fits the map to the widget and edits polygons on it.
-
-    Deliberately simple: the map is shown whole, so the user never has to navigate
-    to find their counter.
-    """
+    """Zoomable, pannable room atlas with polygon editing."""
 
     surfaces_changed = Signal()
     selection_changed = Signal(object)  # Surface | None
@@ -59,6 +55,9 @@ class MapCanvas(QWidget):
         self.draw_mode = False
         self._drag: tuple[Surface, int] | None = None
         self._hover_point: QPointF | None = None
+        self._zoom = 1.0
+        self._pan = QPointF(0.0, 0.0)
+        self._pan_drag: tuple[QPointF, QPointF] | None = None
         # Live overlay: the current frame's pose, so the editor can show which
         # part of the map the camera is looking at right now.
         self.live_pose: Pose | None = None
@@ -67,6 +66,7 @@ class MapCanvas(QWidget):
 
     def set_map(self, canvas: np.ndarray | None) -> None:
         self._map = Q.bgr_to_pixmap(canvas) if canvas is not None else QPixmap()
+        self.reset_view()
         self.update()
 
     def set_surfaces(self, surfaces: list[Surface]) -> None:
@@ -105,15 +105,49 @@ class MapCanvas(QWidget):
 
     # ------------------------------------------------------------- transform
 
-    def _fit(self) -> tuple[float, QPoint]:
+    def _fit(self) -> tuple[float, QPointF]:
         """Scale and top-left offset that fits the map inside this widget."""
         if self._map.isNull():
-            return 1.0, QPoint(0, 0)
+            return 1.0, QPointF(0.0, 0.0)
         sx = self.width() / self._map.width()
         sy = self.height() / self._map.height()
-        s = min(sx, sy)
+        s = min(sx, sy) * self._zoom
         w, h = self._map.width() * s, self._map.height() * s
-        return s, QPoint(int((self.width() - w) / 2), int((self.height() - h) / 2))
+        return s, QPointF(
+            (self.width() - w) / 2.0 + self._pan.x(),
+            (self.height() - h) / 2.0 + self._pan.y(),
+        )
+
+    def set_zoom(self, zoom: float, anchor: QPointF | None = None) -> None:
+        """Change magnification while keeping the point under the cursor still."""
+        zoom = max(1.0, min(12.0, float(zoom)))
+        if self._map.isNull() or abs(zoom - self._zoom) < 1e-6:
+            return
+        anchor = anchor or QPointF(self.width() / 2.0, self.height() / 2.0)
+        map_point = self.view_to_map(anchor)
+        self._zoom = zoom
+        base = min(self.width() / self._map.width(), self.height() / self._map.height())
+        scale = base * self._zoom
+        centered = QPointF(
+            (self.width() - self._map.width() * scale) / 2.0,
+            (self.height() - self._map.height() * scale) / 2.0,
+        )
+        self._pan = QPointF(
+            anchor.x() - map_point[0] * scale - centered.x(),
+            anchor.y() - map_point[1] * scale - centered.y(),
+        )
+        self.update()
+
+    def zoom_in(self) -> None:
+        self.set_zoom(self._zoom * 1.5)
+
+    def zoom_out(self) -> None:
+        self.set_zoom(self._zoom / 1.5)
+
+    def reset_view(self) -> None:
+        self._zoom = 1.0
+        self._pan = QPointF(0.0, 0.0)
+        self.update()
 
     def map_to_view(self, pt) -> QPointF:
         s, off = self._fit()
@@ -138,7 +172,7 @@ class MapCanvas(QWidget):
             return
 
         s, off = self._fit()
-        p.drawPixmap(QRect(off.x(), off.y(), int(self._map.width() * s),
+        p.drawPixmap(QRect(int(off.x()), int(off.y()), int(self._map.width() * s),
                            int(self._map.height() * s)), self._map)
 
         if self.live_pose is not None:
@@ -236,6 +270,9 @@ class MapCanvas(QWidget):
                 self.select(surface)
                 return
         self.select(None)
+        if not self._map.isNull():
+            self._pan_drag = (pos, QPointF(self._pan))
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self.draw_mode:
@@ -243,6 +280,10 @@ class MapCanvas(QWidget):
             self.update()
             return
         if self._drag is None:
+            if self._pan_drag is not None:
+                start, original = self._pan_drag
+                self._pan = original + event.position() - start
+                self.update()
             return
         surface, index = self._drag
         surface.polygon[index] = self.view_to_map(event.position())
@@ -252,6 +293,15 @@ class MapCanvas(QWidget):
         if self._drag is not None:
             self._drag = None
             self.surfaces_changed.emit()
+        if self._pan_drag is not None:
+            self._pan_drag = None
+            self.unsetCursor()
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        delta = event.angleDelta().y()
+        if delta:
+            self.set_zoom(self._zoom * (1.25 if delta > 0 else 0.8), event.position())
+            event.accept()
 
     def mouseDoubleClickEvent(self, _event) -> None:  # noqa: N802
         if self.draw_mode and len(self.drawing) >= MIN_POINTS:
@@ -315,11 +365,27 @@ class SurfaceEditor(QWidget):
 
         left = QVBoxLayout()
         left.setSpacing(8)
-        hint = QLabel("Surfaces are drawn on the room, so they keep working when the "
-                      "camera turns.")
+        hint = QLabel("Choose the clearest view of the surface. Zoom in, then click "
+                      "around its edge.")
         hint.setObjectName("dim")
         hint.setWordWrap(True)
-        left.addWidget(hint)
+        zoom_out = QPushButton("−")
+        zoom_out.setToolTip("Zoom out")
+        zoom_out.setFixedWidth(36)
+        zoom_out.clicked.connect(self.canvas.zoom_out)
+        zoom_in = QPushButton("+")
+        zoom_in.setToolTip("Zoom in")
+        zoom_in.setFixedWidth(36)
+        zoom_in.clicked.connect(self.canvas.zoom_in)
+        fit = QPushButton("Fit")
+        fit.setToolTip("Show every camera view")
+        fit.clicked.connect(self.canvas.reset_view)
+        map_tools = QHBoxLayout()
+        map_tools.addWidget(hint, 1)
+        map_tools.addWidget(zoom_out)
+        map_tools.addWidget(zoom_in)
+        map_tools.addWidget(fit)
+        left.addLayout(map_tools)
         left.addWidget(self.canvas, 1)
 
         right = QVBoxLayout()

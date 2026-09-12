@@ -97,118 +97,9 @@ def test_a_featureless_edge_shortens_the_map_instead_of_failing_it():
     assert camera.pan == 0, "the camera was left facing the featureless wall"
 
 
-def test_twenty_consistent_inliers_are_enough_for_adjacent_scan_frames(monkeypatch):
-    import cv2
-    from types import SimpleNamespace
-
-    from surfaceguard.camera.panorama import _pair_homography
-
-    points = [SimpleNamespace(pt=(float(i * 10), float((i % 5) * 12))) for i in range(20)]
-    descriptors = np.zeros((20, 32), np.uint8)
-
-    class Matcher:
-        def knnMatch(self, _a, _b, k=2):
-            return [
-                [
-                    SimpleNamespace(queryIdx=i, trainIdx=i, distance=10.0),
-                    SimpleNamespace(queryIdx=i, trainIdx=(i + 1) % 20, distance=30.0),
-                ]
-                for i in range(20)
-            ]
-
-    class RegistrarStub:
-        _matcher = Matcher()
-
-        def describe(self, _image):
-            return points, descriptors, 1.0, (100, 100)
-
-    monkeypatch.setattr(
-        cv2,
-        "findHomography",
-        lambda *_args, **_kwargs: (np.eye(3), np.ones((20, 1), np.uint8)),
-    )
-    homography, inliers = _pair_homography(
-        RegistrarStub(), np.zeros((10, 10, 3)), np.zeros((10, 10, 3)), 18
-    )
-
-    assert inliers == 20
-    assert np.allclose(homography, np.eye(3))
-
-
-def test_a_nonmatching_transition_starts_a_new_map_section(monkeypatch):
+def test_room_atlas_keeps_full_turn_views_rectangular_and_readable():
     import surfaceguard.camera.panorama as panorama
 
-    original = panorama._pair_homography
-    calls = 0
-
-    def one_gap(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise panorama.StitchError("only 6 matches")
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(panorama, "_pair_homography", one_gap)
-    camera = SyntheticCamera(fps=60, backlash_px=0, noise=0)
-    camera.start()
-    try:
-        room = panorama.build_room_map(
-            camera, pan_positions=[-30, -15, 0, 15], settle_s=0
-        )
-    finally:
-        camera.stop()
-
-    assert len(room.keyframes) == 4
-    assert room.pan_to_x(-15) < room.pan_to_x(0)
-
-
-def test_an_implausible_homography_starts_a_new_map_section(monkeypatch):
-    import surfaceguard.camera.panorama as panorama
-
-    original = panorama._pair_homography
-    calls = 0
-
-    def one_absurd_transform(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            # Reproduces the class of false-positive match that previously made
-            # Surface Guard attempt a hundreds-of-thousands-pixel canvas.
-            return np.array([
-                [500.0, 0.0, 696_000.0],
-                [0.0, 500.0, 951_000.0],
-                [0.0, 0.0, 1.0],
-            ]), 20
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(panorama, "_pair_homography", one_absurd_transform)
-    camera = SyntheticCamera(fps=60, backlash_px=0, noise=0)
-    camera.start()
-    try:
-        room = panorama.build_room_map(
-            camera, pan_positions=[-30, -15, 0, 15], settle_s=0
-        )
-    finally:
-        camera.stop()
-
-    assert len(room.keyframes) == 4
-    assert room.size[0] < 10_000
-    assert room.size[1] < 10_000
-    assert room.pan_to_x(-15) < room.pan_to_x(0)
-
-
-def test_a_full_turn_is_split_before_flat_projection_reaches_infinity(monkeypatch):
-    import surfaceguard.camera.panorama as panorama
-
-    original = panorama._pair_homography
-    calls = 0
-
-    def count_pairs(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(panorama, "_pair_homography", count_pairs)
     camera = SyntheticCamera(fps=60, backlash_px=0, noise=0)
     camera.start()
     try:
@@ -221,16 +112,24 @@ def test_a_full_turn_is_split_before_flat_projection_reaches_infinity(monkeypatc
         camera.stop()
 
     assert len(room.keyframes) == 7
-    assert calls == 5, "the sixth view should start a fresh projection panel"
+    width, height = room.size
+    assert 1.4 < width / height < 2.2
+    for keyframe in room.keyframes:
+        matrix = keyframe.full_to_map / keyframe.full_to_map[2, 2]
+        assert np.allclose(matrix[0, 1], 0.0)
+        assert np.allclose(matrix[1, 0], 0.0)
+        assert np.allclose(matrix[2, :2], 0.0)
+        assert matrix[0, 0] == pytest.approx(matrix[1, 1])
+        image_height, image_width = keyframe.image.shape[:2]
+        centre = transform_points(
+            keyframe.full_to_map, [(image_width / 2.0, image_height / 2.0)]
+        )[0]
+        assert room.keyframe_at((float(centre[0]), float(centre[1]))) == keyframe.id
 
 
 def test_a_large_valid_atlas_is_scaled_instead_of_failing_setup(monkeypatch):
     import surfaceguard.camera.panorama as panorama
 
-    def no_overlap(*_args, **_kwargs):
-        raise panorama.StitchError("no overlap")
-
-    monkeypatch.setattr(panorama, "_pair_homography", no_overlap)
     monkeypatch.setattr(panorama, "MAX_CANVAS_PX", 10_000)
     monkeypatch.setattr(panorama, "MAX_CANVAS_DIM_PX", 100)
     camera = SyntheticCamera(fps=60, backlash_px=0, noise=0)
@@ -245,6 +144,27 @@ def test_a_large_valid_atlas_is_scaled_instead_of_failing_setup(monkeypatch):
     assert len(room.keyframes) == 4
     assert room.size[0] <= 100
     assert room.size[0] * room.size[1] <= 10_000
+
+
+def test_old_warped_room_maps_are_not_reused(tmp_path):
+    import json
+
+    from surfaceguard.storage.room_map import load_room_map, save_room_map
+
+    camera = SyntheticCamera(fps=60, backlash_px=0, noise=0)
+    camera.start()
+    try:
+        room = build_room_map(camera, pan_positions=[-15, 0, 15], settle_s=0)
+    finally:
+        camera.stop()
+
+    save_room_map(room, tmp_path)
+    assert load_room_map(tmp_path) is not None
+    metadata_path = tmp_path / "map.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata.pop("format_version")
+    metadata_path.write_text(json.dumps(metadata))
+    assert load_room_map(tmp_path) is None
 
 
 def test_surface_guard_does_not_fight_camera_owned_motion_tracking():
@@ -298,6 +218,35 @@ def test_angleless_tracking_view_chooses_the_strongest_map_keyframe(monkeypatch)
     result = registrar.register(np.zeros((100, 100, 3), np.uint8), pan=None)
 
     assert result.keyframe_id == "strong" and result.inliers == 80
+
+
+def test_angleless_tracking_prefers_a_tile_with_a_protected_surface(monkeypatch):
+    from types import SimpleNamespace
+
+    from surfaceguard.camera.registration import RegistrationResult
+
+    registrar = Registrar(min_inliers=30)
+    protected = SimpleNamespace(id="protected")
+    duplicate = SimpleNamespace(id="duplicate")
+    registrar.keyframes = [duplicate, protected]
+    registrar.prefer_keyframes(["protected"])
+    monkeypatch.setattr(
+        registrar,
+        "describe",
+        lambda _image: ([SimpleNamespace(pt=(0.0, 0.0))] * 12,
+                        np.zeros((12, 32), np.uint8), 1.0, (100, 100)),
+    )
+
+    def fit(kf, *_args):
+        inliers = 40 if kf.id == "protected" else 80
+        return RegistrationResult(
+            SimpleNamespace(), inliers, inliers, 1.0, keyframe_id=kf.id
+        )
+
+    monkeypatch.setattr(registrar, "_fit", fit)
+    result = registrar.register(np.zeros((100, 100, 3), np.uint8), pan=None)
+
+    assert result.keyframe_id == "protected"
 
 
 @pytest.fixture(scope="module")

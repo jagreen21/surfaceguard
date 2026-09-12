@@ -448,6 +448,8 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
             if isinstance(self.engine.detector, SyntheticDetector):
                 self.engine.detector = _make_detector(self.prefs, dialog.source)
         self.engine.set_room_map(dialog.room)
+        self.engine.set_surfaces([])
+        self.prefs.surfaces = []
         save_room_map(dialog.room)
         self.prefs.save()
         self.reload_from_prefs()
@@ -458,8 +460,8 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
     def rescan_room(self) -> None:
         confirm = QMessageBox.question(
             self, "Scan the room again?",
-            "The surfaces you have drawn are tied to the current room picture. "
-            "Scanning again will keep them, but they may need nudging into place.",
+            "This replaces the room picture and clears its protection zones. "
+            "You’ll draw the zones again on the new camera views.",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
         )
         if confirm == QMessageBox.StandardButton.Yes:
@@ -860,6 +862,8 @@ class MainWindow(ReviewFlow, QWidget):
                                  "serial": dialog.choice().serial}
             self.engine.detector = _make_detector(self.prefs, dialog.source)
         self.engine.set_room_map(dialog.room)
+        self.engine.set_surfaces([])
+        self.prefs.surfaces = []
         save_room_map(dialog.room); self.prefs.save(); self.reload_from_prefs()
         self.shell.show_page("Rooms"); self.editor.begin_drawing()
         return True
@@ -867,7 +871,8 @@ class MainWindow(ReviewFlow, QWidget):
     def rescan_room(self) -> None:
         answer = QMessageBox.question(
             self, "Scan the room again?",
-            "Your protected surfaces will remain, but they may need nudging into place.",
+            "This replaces the room picture and clears its protection zones. "
+            "You’ll draw the zones again on the new camera views.",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
         if answer == QMessageBox.StandardButton.Yes:
             self.run_setup()
