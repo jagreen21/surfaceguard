@@ -19,9 +19,8 @@ import numpy as np
 from .registration import Registrar, _scale_matrix, _to_work
 from .sources.base import CameraSource, Frame
 
-MAX_CANVAS_PX = 40_000_000  # refuse to allocate a map bigger than this
-MAX_CANVAS_DIM_PX = 32_000  # OpenCV remap uses 16-bit coordinates internally
-MIN_ATLAS_SCALE = 0.25
+MAX_CANVAS_PX = 16_000_000  # bound peak memory while warping on an older laptop
+MAX_CANVAS_DIM_PX = 16_000
 DEFAULT_SWEEP_STEP_DEG = 15.0
 DEFAULT_SWEEP_MARGIN_DEG = 5.0
 MIN_STITCH_INLIERS = 18
@@ -29,8 +28,13 @@ MIN_SHOT_FEATURES = 12
 MAP_SECTION_GAP_PX = 48
 MIN_ADJACENT_AREA_RATIO = 0.15
 MAX_ADJACENT_AREA_RATIO = 6.0
+MIN_PROJECTED_AREA_RATIO = 0.2
+MAX_PROJECTED_AREA_RATIO = 5.0
+MAX_PROJECTED_SPAN_RATIO = 4.0
 MIN_ADJACENT_OVERLAP = 0.01
 MAX_QUAD_EDGE_RATIO = 20.0
+MAX_SECTION_PAN_SPAN_DEG = 60.0
+MAX_SECTION_KEYFRAMES = 5
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +169,20 @@ def _plausible_adjacent_transform(
     if not MIN_ADJACENT_AREA_RATIO <= area_ratio <= MAX_ADJACENT_AREA_RATIO:
         return False
 
+    # Compare against the unwarped frame too. Comparing only to the previous
+    # quad lets a 2x error compound at every sweep position until an otherwise
+    # ordinary room becomes tens of thousands of pixels tall.
+    source_height, source_width = current_image.shape[:2]
+    projected_area_ratio = current_area / float(source_width * source_height)
+    if not MIN_PROJECTED_AREA_RATIO <= projected_area_ratio <= MAX_PROJECTED_AREA_RATIO:
+        return False
+    span_x, span_y = np.ptp(current, axis=0)
+    if (
+        float(span_x) > source_width * MAX_PROJECTED_SPAN_RATIO
+        or float(span_y) > source_height * MAX_PROJECTED_SPAN_RATIO
+    ):
+        return False
+
     edges = np.linalg.norm(current - np.roll(current, -1, axis=0), axis=1)
     if float(edges.min()) < 1.0 or float(edges.max() / edges.min()) > MAX_QUAD_EDGE_RATIO:
         return False
@@ -282,7 +300,29 @@ def build_room_map(
         if not sections:
             sections.append([(np.eye(3), shot)])
             continue
-        previous_h, previous = sections[-1][-1]
+        section = sections[-1]
+        anchor_pan = section[0][1][0]
+        pan_span = (
+            abs(float(shot[0]) - float(anchor_pan))
+            if shot[0] is not None and anchor_pan is not None
+            else 0.0
+        )
+        # A homography is a flat projection. It necessarily approaches infinity
+        # when chained toward a 90-degree turn, even when every feature match is
+        # correct. A full E30 rotation is therefore represented by several
+        # overlapping panels instead of one impossible flat panorama.
+        if (
+            len(section) >= MAX_SECTION_KEYFRAMES
+            or pan_span > MAX_SECTION_PAN_SPAN_DEG
+        ):
+            log.info(
+                "Starting a new room-map panel at pan %s after %.1f degrees",
+                shot[0],
+                pan_span,
+            )
+            sections.append([(np.eye(3), shot)])
+            continue
+        previous_h, previous = section[-1]
         try:
             pair_h, _inliers = _pair_homography(
                 reg, shot[2], previous[2], min_inliers
@@ -292,7 +332,7 @@ def build_room_map(
                 candidate_h, shot[2], previous_h, previous[2]
             ):
                 raise StitchError("adjacent transform had implausible geometry")
-        except StitchError as exc:
+        except (StitchError, cv2.error, ValueError, OverflowError) as exc:
             log.warning(
                 "Starting a new room-map section at pan %s: %s",
                 shot[0],
@@ -331,17 +371,14 @@ def build_room_map(
         raise StitchError(f"stitched map came out an implausible {width}x{height} px")
 
     # A room with several blank transitions can legitimately contain many
-    # independent full-resolution panels. Fit a moderately oversized valid atlas
-    # into OpenCV's safe limits while keeping every original keyframe for runtime
-    # registration. Extreme scaling still indicates corrupt geometry and fails.
+    # independent full-resolution panels. Always fit a valid atlas into the safe
+    # bounds rather than failing setup because its contact sheet is large.
     atlas_scale = min(
         1.0,
         math.sqrt(MAX_CANVAS_PX / float(width * height)),
         MAX_CANVAS_DIM_PX / float(width),
         MAX_CANVAS_DIM_PX / float(height),
     )
-    if atlas_scale < MIN_ATLAS_SCALE:
-        raise StitchError(f"stitched map came out an implausible {width}x{height} px")
     if atlas_scale < 1.0:
         scale = _scale_matrix(atlas_scale)
         placed = [(scale @ transform, shot) for transform, shot in placed]

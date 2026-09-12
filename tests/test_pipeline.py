@@ -197,6 +197,56 @@ def test_an_implausible_homography_starts_a_new_map_section(monkeypatch):
     assert room.pan_to_x(-15) < room.pan_to_x(0)
 
 
+def test_a_full_turn_is_split_before_flat_projection_reaches_infinity(monkeypatch):
+    import surfaceguard.camera.panorama as panorama
+
+    original = panorama._pair_homography
+    calls = 0
+
+    def count_pairs(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(panorama, "_pair_homography", count_pairs)
+    camera = SyntheticCamera(fps=60, backlash_px=0, noise=0)
+    camera.start()
+    try:
+        room = panorama.build_room_map(
+            camera,
+            pan_positions=[-45, -30, -15, 0, 15, 30, 45],
+            settle_s=0,
+        )
+    finally:
+        camera.stop()
+
+    assert len(room.keyframes) == 7
+    assert calls == 5, "the sixth view should start a fresh projection panel"
+
+
+def test_a_large_valid_atlas_is_scaled_instead_of_failing_setup(monkeypatch):
+    import surfaceguard.camera.panorama as panorama
+
+    def no_overlap(*_args, **_kwargs):
+        raise panorama.StitchError("no overlap")
+
+    monkeypatch.setattr(panorama, "_pair_homography", no_overlap)
+    monkeypatch.setattr(panorama, "MAX_CANVAS_PX", 10_000)
+    monkeypatch.setattr(panorama, "MAX_CANVAS_DIM_PX", 100)
+    camera = SyntheticCamera(fps=60, backlash_px=0, noise=0)
+    camera.start()
+    try:
+        room = panorama.build_room_map(
+            camera, pan_positions=[-30, -15, 0, 15], settle_s=0
+        )
+    finally:
+        camera.stop()
+
+    assert len(room.keyframes) == 4
+    assert room.size[0] <= 100
+    assert room.size[0] * room.size[1] <= 10_000
+
+
 def test_surface_guard_does_not_fight_camera_owned_motion_tracking():
     from dataclasses import replace
 
