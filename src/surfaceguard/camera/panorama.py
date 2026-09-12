@@ -1,10 +1,9 @@
 """Build the room map by sweeping the camera (decision D2).
 
-The map is a single stitched panorama of everything the camera can reach. The user
-draws surfaces on it once; at runtime each live frame is located inside it. A
-pan/tilt camera rotating about its optical centre is close to the ideal case for
-stitching, which is why this works with plain pairwise homographies and no bundle
-adjustment.
+The map is a visual atlas of everything the camera can reach. Connected views are
+stitched into panorama sections; a blank wall or a view with no overlap starts a
+new section instead of throwing away the whole scan. The user draws surfaces on
+the atlas once, and each live frame is located against its keyframes at runtime.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ DEFAULT_SWEEP_STEP_DEG = 15.0
 DEFAULT_SWEEP_MARGIN_DEG = 5.0
 MIN_STITCH_INLIERS = 18
 MIN_SHOT_FEATURES = 12
+MAP_SECTION_GAP_PX = 48
 
 
 @dataclass
@@ -53,11 +53,15 @@ class RoomMap:
 
     def pan_to_x(self, pan: float) -> float | None:
         """Approximate map x for a pan angle, by interpolating keyframe centres."""
-        pts = sorted(
-            (kf.pan, float(kf.full_to_map[0, 2] + kf.image.shape[1] / 2.0))
-            for kf in self.keyframes
-            if kf.pan is not None
-        )
+        pts = []
+        for kf in self.keyframes:
+            if kf.pan is None:
+                continue
+            height, width = kf.image.shape[:2]
+            centre = np.float32([[[width / 2.0, height / 2.0]]])
+            mapped = cv2.perspectiveTransform(centre, kf.full_to_map)[0, 0]
+            pts.append((kf.pan, float(mapped[0])))
+        pts.sort()
         if len(pts) < 2:
             return None
         pans = np.array([p for p, _ in pts])
@@ -112,8 +116,8 @@ def build_room_map(
 ) -> RoomMap:
     """Sweep ``source`` across ``pan_positions`` and stitch the result.
 
-    Raises :class:`StitchError` with a user-facing reason if adjacent positions
-    do not overlap enough to chain together.
+    Adjacent positions that do not overlap begin a new atlas section. A
+    :class:`StitchError` is reserved for failures that leave no usable map.
     """
     caps = source.capabilities
     angles = getattr(source, "current_angles", None)
@@ -192,34 +196,56 @@ def build_room_map(
             "the surfaces you want to protect and try again"
         )
 
-    # Chain each shot onto the first one's coordinate frame.
-    chain: list[np.ndarray] = [np.eye(3)]
-    inlier_counts: list[int] = []
-    for i in range(1, len(shots)):
-        h, inliers = _pair_homography(reg, shots[i][2], shots[i - 1][2], min_inliers)
-        chain.append(chain[i - 1] @ h)
-        inlier_counts.append(inliers)
+    # Chain matching neighbours. A transition with six matches is not evidence
+    # that either picture is bad; it only means they cannot share coordinates.
+    # Keep both as separate atlas sections so every trackable view remains usable.
+    sections: list[list[tuple[np.ndarray, tuple[float | None, float | None, np.ndarray]]]] = []
+    for shot in shots:
+        if not sections:
+            sections.append([(np.eye(3), shot)])
+            continue
+        previous_h, previous = sections[-1][-1]
+        try:
+            pair_h, _inliers = _pair_homography(
+                reg, shot[2], previous[2], min_inliers
+            )
+        except StitchError:
+            sections.append([(np.eye(3), shot)])
+        else:
+            sections[-1].append((previous_h @ pair_h, shot))
 
-    # Find the bounding box of every warped shot, then shift into positive space.
-    corners = []
-    for h, (_, _, img) in zip(chain, shots):
-        hh, ww = img.shape[:2]
-        quad = np.float32([[0, 0], [ww, 0], [ww, hh], [0, hh]]).reshape(-1, 1, 2)
-        corners.append(cv2.perspectiveTransform(quad, h).reshape(-1, 2))
-    allc = np.vstack(corners)
-    x0, y0 = np.floor(allc.min(axis=0)).astype(int)
-    x1, y1 = np.ceil(allc.max(axis=0)).astype(int)
-    width, height = int(x1 - x0), int(y1 - y0)
+    # Lay independent panorama sections left-to-right in one drawable atlas.
+    placed: list[tuple[np.ndarray, tuple[float | None, float | None, np.ndarray]]] = []
+    cursor_x = 0
+    height = 0
+    for section in sections:
+        corners = []
+        for transform, (_pan, _tilt, image) in section:
+            hh, ww = image.shape[:2]
+            quad = np.float32([[0, 0], [ww, 0], [ww, hh], [0, hh]]).reshape(-1, 1, 2)
+            corners.append(cv2.perspectiveTransform(quad, transform).reshape(-1, 2))
+        allc = np.vstack(corners)
+        x0, y0 = np.floor(allc.min(axis=0)).astype(int)
+        x1, y1 = np.ceil(allc.max(axis=0)).astype(int)
+        section_width, section_height = int(x1 - x0), int(y1 - y0)
+        section_shift = np.array([
+            [1.0, 0.0, float(cursor_x - x0)],
+            [0.0, 1.0, float(-y0)],
+            [0.0, 0.0, 1.0],
+        ])
+        placed.extend((section_shift @ transform, shot) for transform, shot in section)
+        cursor_x += section_width + MAP_SECTION_GAP_PX
+        height = max(height, section_height)
+
+    width = cursor_x - MAP_SECTION_GAP_PX
     if width <= 0 or height <= 0 or width * height > MAX_CANVAS_PX:
         raise StitchError(f"stitched map came out an implausible {width}x{height} px")
 
-    shift = np.array([[1.0, 0.0, -float(x0)], [0.0, 1.0, -float(y0)], [0.0, 0.0, 1.0]])
     canvas = np.zeros((height, width, 3), np.uint8)
     filled = np.zeros((height, width), np.uint8)
     keyframes: list[MapKeyframe] = []
 
-    for i, (h, (pan, tlt, img)) in enumerate(zip(chain, shots)):
-        full_to_map = shift @ h
+    for i, (full_to_map, (pan, tlt, img)) in enumerate(placed):
         warped = cv2.warpPerspective(img, full_to_map, (width, height))
         mask = cv2.warpPerspective(
             np.full(img.shape[:2], 255, np.uint8), full_to_map, (width, height)

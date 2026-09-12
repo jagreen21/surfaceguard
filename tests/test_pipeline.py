@@ -135,6 +135,33 @@ def test_twenty_consistent_inliers_are_enough_for_adjacent_scan_frames(monkeypat
     assert np.allclose(homography, np.eye(3))
 
 
+def test_a_nonmatching_transition_starts_a_new_map_section(monkeypatch):
+    import surfaceguard.camera.panorama as panorama
+
+    original = panorama._pair_homography
+    calls = 0
+
+    def one_gap(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise panorama.StitchError("only 6 matches")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(panorama, "_pair_homography", one_gap)
+    camera = SyntheticCamera(fps=60, backlash_px=0, noise=0)
+    camera.start()
+    try:
+        room = panorama.build_room_map(
+            camera, pan_positions=[-30, -15, 0, 15], settle_s=0
+        )
+    finally:
+        camera.stop()
+
+    assert len(room.keyframes) == 4
+    assert room.pan_to_x(-15) < room.pan_to_x(0)
+
+
 def test_surface_guard_does_not_fight_camera_owned_motion_tracking():
     from dataclasses import replace
 
