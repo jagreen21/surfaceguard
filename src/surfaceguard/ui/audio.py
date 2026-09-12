@@ -5,7 +5,6 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
-    QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -33,45 +32,35 @@ class AudioScreen(QWidget):
 
         response = GlassCard()
         rh = QHBoxLayout()
-        title = QLabel("Audio response"); title.setObjectName("cardTitle")
+        title = QLabel("Sound response"); title.setObjectName("cardTitle")
         self.ready = StatusPill("Ready", "good")
         rh.addWidget(title); rh.addStretch(1); rh.addWidget(self.ready)
         response.box.addLayout(rh)
 
         self.surface = QComboBox()
+        self.surface.setAccessibleName("Surface")
         self.surface.currentIndexChanged.connect(self._load_surface)
         self.sound = QComboBox()
+        self.sound.setAccessibleName("Sound response")
         self.sound.currentTextChanged.connect(self._push)
-        self.chime_choice = QPushButton("◉   Chime\n      A gentle alert sound")
-        self.chime_choice.setObjectName("optionButton")
-        self.chime_choice.setCheckable(True)
-        self.chime_choice.clicked.connect(self._choose_chime)
-        self.voice_choice = QPushButton("○   Voice\n      Unavailable in this build")
-        self.voice_choice.setObjectName("optionButton")
-        self.voice_choice.setEnabled(False)
-        self.custom_choice = QPushButton("○   Custom Sound\n      Import your own WAV file")
-        self.custom_choice.setObjectName("optionButton")
-        self.custom_choice.setCheckable(True)
-        self.custom_choice.clicked.connect(self.import_requested.emit)
+        self.import_button = QPushButton("Import custom sound…")
+        self.import_button.clicked.connect(self.import_requested.emit)
         self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume.setAccessibleName("Sound volume")
         self.volume.setRange(0, 100); self.volume.valueChanged.connect(self._push)
         self.delay = QComboBox()
+        self.delay.setAccessibleName("Response delay")
         self.delay.addItems(["Immediately", "After 1 second", "After 2 seconds", "After 5 seconds"])
         self.delay.currentIndexChanged.connect(self._push)
-        self.cooldown = QDoubleSpinBox()
-        self.cooldown.setRange(2, 300); self.cooldown.setSuffix(" seconds")
-        self.cooldown.valueChanged.connect(self._push)
-        cap = QLabel("Protected surface"); cap.setObjectName("eyebrow")
+        cap = QLabel("Surface"); cap.setObjectName("eyebrow")
         response.box.addWidget(cap); response.box.addWidget(self.surface)
-        response.box.addWidget(self.chime_choice)
-        response.box.addWidget(self.voice_choice)
-        response.box.addWidget(self.custom_choice)
-        for label, widget in (("Chime style", self.sound), ("Volume", self.volume),
-                              ("Cooldown", self.cooldown)):
+        for label, widget in (("Sound", self.sound), ("Volume", self.volume),
+                              ("Play the sound", self.delay)):
             cap = QLabel(label); cap.setObjectName("eyebrow")
             response.box.addWidget(cap); response.box.addWidget(widget)
+        response.box.addWidget(self.import_button)
         actions = QHBoxLayout()
-        test = QPushButton("Test Sound"); test.setObjectName("primary")
+        test = QPushButton("Test sound"); test.setObjectName("primary")
         test.clicked.connect(self.test_requested.emit)
         actions.addStretch(1); actions.addWidget(test)
         response.box.addLayout(actions)
@@ -80,6 +69,7 @@ class AudioScreen(QWidget):
         oh = QLabel("Audio output"); oh.setObjectName("cardTitle")
         output.box.addWidget(oh)
         self.destination = QComboBox()
+        self.destination.setAccessibleName("Audio output")
         self.destination.currentIndexChanged.connect(self._push_output)
         output.box.addWidget(self.destination)
         self.output_note = QLabel("This Mac is the dependable default output.")
@@ -102,7 +92,7 @@ class AudioScreen(QWidget):
         self.sound.blockSignals(True)
         self.destination.blockSignals(True)
         self.surface.clear()
-        self.surface.addItems([s.name for s in surfaces] or ["No protected surfaces"])
+        self.surface.addItems([s.name for s in surfaces] or ["No surfaces"])
         self.surface.setEnabled(bool(surfaces))
         self.sound.clear(); self.sound.addItems(sounds)
         self.destination.clear()
@@ -130,10 +120,6 @@ class AudioScreen(QWidget):
         self.destination.blockSignals(False)
         self._loading = False
 
-    def _choose_chime(self) -> None:
-        if self.sound.findText("chirp") >= 0:
-            self.sound.setCurrentText("chirp")
-
     def _load_surface(self) -> None:
         i = self.surface.currentIndex()
         if not (0 <= i < len(self._surfaces)):
@@ -144,10 +130,6 @@ class AudioScreen(QWidget):
         self.sound.setCurrentText(s.deterrent.sound)
         self.volume.setValue(round(s.deterrent.volume * 100))
         self.delay.setCurrentIndex({0.0: 0, 1.0: 1, 2.0: 2, 5.0: 3}.get(s.deterrent.delay_s, 0))
-        self.cooldown.setValue(s.deterrent.cooldown_s)
-        built_in = s.deterrent.sound in {"chirp", "clack", "hiss", "warble"}
-        self.chime_choice.setChecked(built_in)
-        self.custom_choice.setChecked(not built_in)
         self._loading = was_loading
 
     def _push(self) -> None:
@@ -160,7 +142,6 @@ class AudioScreen(QWidget):
         s.deterrent.sound = self.sound.currentText()
         s.deterrent.volume = self.volume.value() / 100.0
         s.deterrent.delay_s = [0.0, 1.0, 2.0, 5.0][self.delay.currentIndex()]
-        s.deterrent.cooldown_s = self.cooldown.value()
         self.settings_changed.emit()
 
     def _push_output(self) -> None:

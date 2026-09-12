@@ -39,8 +39,7 @@ class _DeviceCard(GlassCard):
             self.box.addWidget(label)
         if device.battery_percent is not None:
             battery = device.battery_percent
-            charging = " · Charging" if device.charging else ""
-            text = f"Low Battery · {battery}%" if battery < 15 else f"Battery {battery}%{charging}"
+            text = f"Low battery · {battery}%" if battery < 15 else f"Battery {battery}%"
             tone = "bad" if battery < 15 else ("warning" if battery < 30 else "neutral")
             self.box.addWidget(StatusPill(text, tone))
         if not device.online:
@@ -76,9 +75,9 @@ class DevicesScreen(QWidget):
             self.content.addStretch(1)
             return
         groups = (
-            (DeviceKind.MAIN_UNIT, "Main Unit"),
+            (DeviceKind.MAIN_UNIT, "Main unit"),
             (DeviceKind.CAMERA, "Cameras"),
-            (DeviceKind.SPEAKER, "Audio Outputs"),
+            (DeviceKind.SPEAKER, "Audio outputs"),
         )
         for kind, title in groups:
             devices = [d for d in state.devices if d.kind is kind]

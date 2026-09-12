@@ -53,9 +53,6 @@ class DeviceCapabilities:
     microphone: bool = False
     speaker: bool = False
     battery: bool = False
-    charging: bool = False
-    stereo_pairing: bool = False
-    magnetic_docking: bool = False
 
 
 @dataclass(frozen=True)
@@ -66,7 +63,6 @@ class DeviceViewState:
     room_id: str | None = None
     online: bool = False
     battery_percent: int | None = None
-    charging: bool = False
     detail: str = ""
     capabilities: DeviceCapabilities = field(default_factory=DeviceCapabilities)
 
@@ -159,7 +155,7 @@ class StateStore:
 
         if not self.has_map or not self.has_surfaces:
             if not self.has_map:
-                missing = ("Scan this room to place protection zones" if self.has_camera
+                missing = ("Scan this room to place surfaces" if self.has_camera
                            else "Connect your camera to get started")
             else:
                 missing = "Draw the first surface you want protected"
@@ -189,7 +185,7 @@ class StateStore:
 
         warning = report.warnings[0].detail if report.warnings else ""
         if now < self.alert_until:
-            return AppState(Phase.ALERTING, "Cat spotted", "Playing the deterrent now", Severity.GOOD)
+            return AppState(Phase.ALERTING, "Cat spotted", "Playing the sound response now", Severity.GOOD)
         return AppState(Phase.GUARDING, "Protecting", warning or "Looking for cats", Severity.GOOD)
 
 

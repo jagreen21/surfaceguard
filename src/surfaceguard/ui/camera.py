@@ -26,8 +26,8 @@ class CameraScreen(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.live = LiveView()
-        self.header = PageHeader("Live View", "Watch the room and use supported camera controls.")
-        self.connect = QPushButton("Connect Camera")
+        self.header = PageHeader("Live view", "Watch the room and use supported camera controls.")
+        self.connect = QPushButton("Connect camera")
         self.connect.clicked.connect(self.connect_requested.emit)
         self.header.add_action(self.connect)
 
@@ -45,17 +45,17 @@ class CameraScreen(QWidget):
 
         controls = GlassCard(compact=True)
         action_row = QHBoxLayout()
-        self.snapshot = QPushButton("◉  Snapshot")
+        self.snapshot = QPushButton("Take snapshot")
         self.snapshot.setObjectName("primary")
         self.snapshot.clicked.connect(self.snapshot_requested.emit)
-        self.camera_sound = QPushButton("◖  Test Sound")
+        self.camera_sound = QPushButton("Test sound")
         self.camera_sound.clicked.connect(self.camera_sound_requested.emit)
         action_row.addWidget(self.snapshot); action_row.addWidget(self.camera_sound); action_row.addStretch(1)
         controls.box.addLayout(action_row)
         overlays = QHBoxLayout()
-        self.zones = QCheckBox("Protected Zones")
-        self.boxes = QCheckBox("Detection Boxes")
-        self.labels = QCheckBox("Surface Labels")
+        self.zones = QCheckBox("Surfaces")
+        self.boxes = QCheckBox("Detection boxes")
+        self.labels = QCheckBox("Surface labels")
         for check in (self.zones, self.boxes, self.labels):
             check.toggled.connect(self._emit_overlays)
             overlays.addWidget(check)
@@ -74,7 +74,7 @@ class CameraScreen(QWidget):
         self.live.set_camera_name(model or name)
         self.snapshot.setEnabled(online)
         self.camera_sound.setVisible(has_speaker)
-        self.connect.setText("Change Camera" if name else "Connect Camera")
+        self.connect.setText("Change camera" if name else "Connect camera")
         for control, value in ((self.zones, zones), (self.boxes, boxes), (self.labels, labels)):
             control.blockSignals(True); control.setChecked(value); control.blockSignals(False)
         self.live.set_overlays(zones, boxes, labels)

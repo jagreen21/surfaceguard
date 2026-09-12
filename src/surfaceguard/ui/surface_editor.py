@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -41,6 +42,7 @@ class MapCanvas(QWidget):
 
     surfaces_changed = Signal()
     selection_changed = Signal(object)  # Surface | None
+    undo_available_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -54,6 +56,8 @@ class MapCanvas(QWidget):
         self.drawing: list[tuple[float, float]] = []
         self.draw_mode = False
         self._drag: tuple[Surface, int] | None = None
+        self._drag_origin: np.ndarray | None = None
+        self._undo_stack: list[tuple[Surface, np.ndarray]] = []
         self._hover_point: QPointF | None = None
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
@@ -71,6 +75,8 @@ class MapCanvas(QWidget):
 
     def set_surfaces(self, surfaces: list[Surface]) -> None:
         self.surfaces = surfaces
+        self._undo_stack.clear()
+        self.undo_available_changed.emit(False)
         if self.selected is not None and self.selected not in surfaces:
             self.select(None)
         self.update()
@@ -148,6 +154,19 @@ class MapCanvas(QWidget):
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self.update()
+
+    def undo_last_edit(self) -> None:
+        """Restore the polygon from before the most recent vertex drag."""
+        while self._undo_stack:
+            surface, polygon = self._undo_stack.pop()
+            if surface in self.surfaces:
+                surface.polygon = polygon.copy()
+                self.select(surface)
+                self.surfaces_changed.emit()
+                self.undo_available_changed.emit(bool(self._undo_stack))
+                self.update()
+                return
+        self.undo_available_changed.emit(False)
 
     def map_to_view(self, pt) -> QPointF:
         s, off = self._fit()
@@ -263,6 +282,7 @@ class MapCanvas(QWidget):
             for i, pt in enumerate(self.selected.polygon):
                 if (self.map_to_view(pt) - pos).manhattanLength() <= HANDLE_R * 2.4:
                     self._drag = (self.selected, i)
+                    self._drag_origin = self.selected.polygon.copy()
                     return
         for surface in reversed(self.surfaces):
             poly = QPolygonF([self.map_to_view(pt) for pt in surface.polygon])
@@ -291,7 +311,14 @@ class MapCanvas(QWidget):
 
     def mouseReleaseEvent(self, _event) -> None:  # noqa: N802
         if self._drag is not None:
+            surface, _index = self._drag
+            if self._drag_origin is not None and not np.array_equal(
+                    self._drag_origin, surface.polygon):
+                self._undo_stack.append((surface, self._drag_origin))
+                self._undo_stack = self._undo_stack[-50:]
+                self.undo_available_changed.emit(True)
             self._drag = None
+            self._drag_origin = None
             self.surfaces_changed.emit()
         if self._pan_drag is not None:
             self._pan_drag = None
@@ -333,14 +360,16 @@ class SurfaceEditor(QWidget):
         self.canvas = MapCanvas(self)
         self.canvas.surfaces_changed.connect(self._on_canvas_changed)
         self.canvas.selection_changed.connect(self._on_selected)
+        self.canvas.undo_available_changed.connect(self._set_undo_available)
 
         self.list = QListWidget()
+        self.list.setAccessibleName("Surfaces")
         self.list.currentRowChanged.connect(self._on_row)
 
-        self.add_btn = QPushButton("Add Protection Zone")
+        self.add_btn = QPushButton("Add surface")
         self.add_btn.setObjectName("primary")
         self.add_btn.clicked.connect(self.begin_drawing)
-        self.done_btn = QPushButton("Save Zone")
+        self.done_btn = QPushButton("Save surface")
         self.done_btn.setObjectName("primary")
         self.done_btn.clicked.connect(self.commit_drawing)
         self.done_btn.setVisible(False)
@@ -356,6 +385,7 @@ class SurfaceEditor(QWidget):
         self.settings.test.clicked.connect(self.test_sound_requested.emit)
 
         self.pending_name = QComboBox()
+        self.pending_name.setAccessibleName("New surface name")
         self.pending_name.setEditable(True)
         self.pending_name.addItems([
             "Kitchen Counter", "Dining Table", "Coffee Table", "TV Stand",
@@ -380,17 +410,24 @@ class SurfaceEditor(QWidget):
         fit = QPushButton("Fit")
         fit.setToolTip("Show every camera view")
         fit.clicked.connect(self.canvas.reset_view)
+        self.undo_btn = QPushButton("Undo edit")
+        self.undo_btn.setToolTip("Undo the last corner move (Command-Z)")
+        self.undo_btn.setEnabled(False)
+        self.undo_btn.clicked.connect(self.undo)
         map_tools = QHBoxLayout()
         map_tools.addWidget(hint, 1)
+        map_tools.addWidget(self.undo_btn)
         map_tools.addWidget(zoom_out)
         map_tools.addWidget(zoom_in)
         map_tools.addWidget(fit)
         left.addLayout(map_tools)
         left.addWidget(self.canvas, 1)
+        self.map_panel = QWidget()
+        self.map_panel.setLayout(left)
 
         right = QVBoxLayout()
         right.setSpacing(8)
-        title = QLabel("Protected surfaces")
+        title = QLabel("Surfaces")
         title.setObjectName("h2")
         right.addWidget(title)
         right.addWidget(self.list, 1)
@@ -409,12 +446,31 @@ class SurfaceEditor(QWidget):
         holder.setMaximumWidth(350)
         holder.setLayout(right)
 
-        root = QHBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(14)
-        root.addLayout(left, 1)
-        root.addWidget(holder)
+        self.settings_panel = holder
+        self.root = QGridLayout(self)
+        self.root.setContentsMargins(14, 14, 14, 14)
+        self.root.setSpacing(14)
+        self.root.addWidget(self.map_panel, 0, 0)
+        self.root.addWidget(holder, 0, 1)
+        self.root.setColumnStretch(0, 1)
+        self._narrow = False
         self._refresh_buttons()
+
+    def adapt_to_width(self, width: int) -> None:
+        narrow = width < 820
+        if narrow == self._narrow:
+            return
+        self._narrow = narrow
+        self.root.removeWidget(self.map_panel)
+        self.root.removeWidget(self.settings_panel)
+        if narrow:
+            self.settings_panel.setMaximumWidth(16777215)
+            self.root.addWidget(self.map_panel, 0, 0)
+            self.root.addWidget(self.settings_panel, 1, 0)
+        else:
+            self.settings_panel.setMaximumWidth(350)
+            self.root.addWidget(self.map_panel, 0, 0)
+            self.root.addWidget(self.settings_panel, 0, 1)
 
     # ------------------------------------------------------------------ data
 
@@ -430,6 +486,12 @@ class SurfaceEditor(QWidget):
     def set_live_pose(self, pose: Pose | None) -> None:
         self.canvas.live_pose = pose
         self.canvas.update()
+
+    def undo(self) -> None:
+        self.canvas.undo_last_edit()
+
+    def _set_undo_available(self, available: bool) -> None:
+        self.undo_btn.setEnabled(available)
 
     # -------------------------------------------------------------- drawing
 
@@ -529,16 +591,21 @@ class _DeterrentPanel(QFrame):
         self.surface: Surface | None = None
 
         self.name = QLineEdit()
+        self.name.setAccessibleName("Surface name")
         self.name.setPlaceholderText("Kitchen counter")
         self.enabled = QCheckBox("Protect this surface")
         self.sound = QComboBox()
+        self.sound.setAccessibleName("Sound response")
         self.sound.addItems(["chirp", "clack", "hiss", "warble"])
         self.test = QPushButton("Test sound")
         self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume.setAccessibleName("Sound volume")
         self.volume.setRange(0, 100)
         self.delay = QComboBox()
+        self.delay.setAccessibleName("Response delay")
         self.delay.addItems(["Right away", "After 1 second", "After 2 seconds", "After 5 seconds"])
         self.cooldown = QDoubleSpinBox()
+        self.cooldown.setAccessibleName("Wait before repeating")
         self.cooldown.setRange(2.0, 300.0)
         self.cooldown.setSuffix(" s")
         self.cooldown.setSingleStep(5.0)
@@ -550,7 +617,7 @@ class _DeterrentPanel(QFrame):
         for label, widget in (
             ("Name", self.name),
             ("", self.enabled),
-            ("Sound", self.sound),
+            ("Sound response", self.sound),
             ("Volume", self.volume),
             ("Play the sound", self.delay),
             ("Wait before repeating", self.cooldown),

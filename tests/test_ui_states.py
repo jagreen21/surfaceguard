@@ -1,4 +1,6 @@
-from surfaceguard.state import DeviceKind, StateStore
+import numpy as np
+
+from surfaceguard.state import DeviceKind, DeviceViewState, StateStore
 from surfaceguard.ui.mock_states import configurations
 
 
@@ -32,8 +34,6 @@ def test_setup_copy_distinguishes_camera_connection_from_room_scan():
 
 
 def test_room_map_can_be_zoomed_and_reset(qt_app):
-    import numpy as np
-
     from surfaceguard.ui.surface_editor import MapCanvas
 
     canvas = MapCanvas()
@@ -49,3 +49,57 @@ def test_room_map_can_be_zoomed_and_reset(qt_app):
     canvas.reset_view()
     reset, _ = canvas._fit()
     assert reset == fitted
+
+
+def test_home_exposes_pause_test_and_coverage_controls(qt_app):
+    from surfaceguard.ui.home import HomeScreen
+
+    home = HomeScreen()
+    for widget in (home.pause30, home.pause_tomorrow, home.test_btn, home.coverage):
+        assert home.isAncestorOf(widget)
+
+    home.adapt_to_width(600)
+    assert home.quick.indexOf(home.protection_card) >= 0
+    assert home.quick.getItemPosition(home.quick.indexOf(home.audio_card))[0] == 2
+
+
+def test_audio_exposes_response_delay_without_duplicate_cooldown(qt_app):
+    from surfaceguard.ui.audio import AudioScreen
+
+    audio = AudioScreen()
+    assert audio.isAncestorOf(audio.delay)
+    assert not hasattr(audio, "cooldown")
+    assert not hasattr(audio, "chime_choice")
+
+
+def test_shell_has_activity_and_dynamic_device_inventory(qt_app):
+    from PySide6.QtWidgets import QWidget
+
+    from surfaceguard.ui.shell import AppShell, DESTINATIONS
+
+    pages = {name: QWidget() for _symbol, name in DESTINATIONS}
+    pages["System Health"] = QWidget()
+    shell = AppShell(pages)
+    devices = [
+        DeviceViewState(str(i), f"Device {i}", DeviceKind.SPEAKER, online=True)
+        for i in range(7)
+    ]
+    shell.set_inventory(devices)
+    assert "Activity" in shell.buttons
+    assert len(shell.device_labels) == 7
+    shell.show_page("System Health")
+    assert shell.current_name == "System Health"
+
+
+def test_surface_vertex_edits_can_be_undone(qt_app):
+    from surfaceguard.geometry.surface import Surface
+    from surfaceguard.ui.surface_editor import MapCanvas
+
+    original = np.asarray([(10.0, 10.0), (80.0, 10.0), (80.0, 80.0)])
+    surface = Surface("Counter", original.copy())
+    canvas = MapCanvas()
+    canvas.set_surfaces([surface])
+    canvas._undo_stack.append((surface, original.copy()))
+    surface.polygon[0] = (30.0, 40.0)
+    canvas.undo_last_edit()
+    assert np.array_equal(surface.polygon, original)

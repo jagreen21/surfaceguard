@@ -311,10 +311,10 @@ class AlertPage(QWidget):
         self.question = QLabel("I played the sound. Was that right?")
         self.question.setObjectName("cardTitle")
 
-        self.yes = QPushButton("✓  Yes, cat on it")
+        self.yes = QPushButton("Yes, cat on it")
         self.yes.setObjectName("primary")
         self.yes.clicked.connect(lambda: self.answered.emit("correct"))
-        self.no = QPushButton("✗  No")
+        self.no = QPushButton("No")
         self.no.clicked.connect(self._show_follow_ups)
         self.unsure = QPushButton("Not sure")
         self.unsure.setObjectName("secondary")
@@ -335,7 +335,7 @@ class AlertPage(QWidget):
         follow.addStretch(1)
         self.follow_row.setVisible(False)
 
-        self.undo = QPushButton("↩  Undo")
+        self.undo = QPushButton("Undo")
         self.undo.setObjectName("secondary")
         self.undo.clicked.connect(self.undo_requested.emit)
         self.why = QPushButton("Why am I being asked this?")

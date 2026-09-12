@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
-    QSlider,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -194,20 +193,6 @@ class HomeScreen(QWidget):
         self.live = LiveView()
         self.live.setObjectName("heroView")
 
-        # A slim titlebar mirrors the approved desktop render without replacing
-        # the native macOS chrome.
-        self.clock = QLabel("")
-        self.clock.setObjectName("muted")
-        settings = QPushButton("⚙")
-        settings.setFixedSize(30, 30)
-        settings.setStyleSheet("padding: 0; font-size: 16px;")
-        settings.setToolTip("Settings")
-        settings.clicked.connect(lambda: self.navigate_requested.emit("Settings"))
-        topbar = QHBoxLayout()
-        topbar.addStretch(1)
-        topbar.addWidget(self.clock)
-        topbar.addWidget(settings)
-
         self.headline = QLabel("Starting up")
         self.headline.setObjectName("cardTitle")
         self.detail = QLabel("")
@@ -221,6 +206,7 @@ class HomeScreen(QWidget):
         self.attention_action.setObjectName("primary")
         self.attention_action.clicked.connect(self._toggle)
         self.attention_card = GlassCard(compact=True)
+        self.attention_card.setObjectName("statusCard")
         attention_top = QHBoxLayout()
         attention_top.addWidget(self.dot)
         attention_top.addWidget(self.headline)
@@ -235,6 +221,7 @@ class HomeScreen(QWidget):
         self.protect_btn.setObjectName("toggleButton")
         self.protect_btn.setCheckable(True)
         self.protect_btn.setToolTip("Turn protection on or off")
+        self.protect_btn.setAccessibleName("Protection")
         self.protect_btn.clicked.connect(self._toggle)
         self.pause30 = QPushButton("Pause 30 minutes")
         self.pause30.clicked.connect(lambda: self.pause_requested.emit(1800.0))
@@ -260,27 +247,39 @@ class HomeScreen(QWidget):
         hero_box.setContentsMargins(1, 1, 1, 1)
         hero_box.addWidget(self.live)
 
-        self.protection_card = ActionCard("◈  PROTECTION", "Active", "Kitchen Counter  ·  24/7")
+        self.protection_card = ActionCard("Protection", "Active", "Kitchen Counter  ·  24/7")
         self.protection_card.add_trailing(self.protect_btn)
-        self.detection_card = ActionCard("◉  DETECTION SENSITIVITY", "Balanced", "Medium")
-        self.detection_meter = QSlider(Qt.Orientation.Horizontal)
-        self.detection_meter.setRange(0, 2)
-        self.detection_meter.setValue(1)
-        self.detection_meter.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.detection_card.add_control(self.detection_meter)
-        self.audio_card = ActionCard("◖  AUDIO RESPONSE", "Short hiss", "This Mac")
+        self.detection_card = ActionCard("Detection sensitivity", "Balanced", "Medium")
+        self.audio_card = ActionCard("Sound response", "Short hiss", "This Mac")
         chevron = QLabel("›")
         chevron.setStyleSheet("font-size: 24px; color: #96a4ad")
         self.audio_card.add_trailing(chevron)
         self.protection_card.activated.connect(lambda: self.navigate_requested.emit("Rooms"))
         self.detection_card.activated.connect(lambda: self.navigate_requested.emit("Detection"))
         self.audio_card.activated.connect(lambda: self.navigate_requested.emit("Audio"))
-        quick = QGridLayout()
-        quick.setSpacing(12)
-        for i, card in enumerate((self.protection_card, self.detection_card, self.audio_card)):
-            quick.addWidget(card, 0, i)
+        self.quick = QGridLayout()
+        self.quick.setSpacing(12)
+        self.quick_cards = (self.protection_card, self.detection_card, self.audio_card)
+        self._quick_columns = 3
+        for i, card in enumerate(self.quick_cards):
+            self.quick.addWidget(card, 0, i)
+
+        protection_actions = QHBoxLayout()
+        protection_actions.setSpacing(8)
+        protection_actions.addWidget(self.pause30)
+        protection_actions.addWidget(self.pause_tomorrow)
+        protection_actions.addWidget(self.test_btn)
+        protection_actions.addStretch(1)
+
+        coverage_card = GlassCard(compact=True)
+        coverage_card.setObjectName("sectionCard")
+        coverage_title = QLabel("Coverage")
+        coverage_title.setObjectName("cardTitle")
+        coverage_card.box.addWidget(coverage_title)
+        coverage_card.box.addWidget(self.coverage)
 
         recent_card = GlassCard(compact=True)
+        recent_card.setObjectName("sectionCard")
         recent_row = QHBoxLayout()
         recent = QLabel("Events")
         recent.setObjectName("cardTitle")
@@ -314,11 +313,12 @@ class HomeScreen(QWidget):
         body = QVBoxLayout(content)
         body.setContentsMargins(12, 12, 12, 12)
         body.setSpacing(10)
-        body.addLayout(topbar)
         body.addWidget(self.attention_card)
         body.addWidget(self.invite)
         body.addWidget(hero, 1)
-        body.addLayout(quick)
+        body.addLayout(self.quick)
+        body.addLayout(protection_actions)
+        body.addWidget(coverage_card)
         body.addWidget(recent_card)
 
         scroll = QScrollArea()
@@ -330,16 +330,25 @@ class HomeScreen(QWidget):
 
         self._state: AppState | None = None
 
+    def adapt_to_width(self, width: int) -> None:
+        """Reflow dashboard cards instead of squeezing three columns unreadably."""
+        columns = 1 if width < 720 else 3
+        if columns == self._quick_columns:
+            return
+        self._quick_columns = columns
+        for card in self.quick_cards:
+            self.quick.removeWidget(card)
+        for index, card in enumerate(self.quick_cards):
+            self.quick.addWidget(card, index // columns, index % columns)
+
     def set_context(self, room_name: str, surface_summary: str, sensitivity: str,
                     audio_name: str, audio_target: str) -> None:
         self.live.set_room_name(room_name)
-        self.clock.setText(time.strftime("%a, %b %d  •  %I:%M %p").replace(" 0", " "))
         self.protection_card.detail.setText(surface_summary)
         self.detection_card.title.setText(sensitivity)
         self.detection_card.detail.setText({
             "Calm": "Low", "Balanced": "Medium", "Sensitive": "High"
         }.get(sensitivity, sensitivity))
-        self.detection_meter.setValue({"Calm": 0, "Balanced": 1, "Sensitive": 2}.get(sensitivity, 1))
         self.audio_card.title.setText(audio_name)
         self.audio_card.detail.setText(audio_target)
 
@@ -446,5 +455,5 @@ def _seconds_until_tomorrow() -> float:
 def _friendly_registration_message(reason: str) -> str:
     """Translate map-localisation internals into an actionable camera message."""
     if "keyframe" in reason.lower():
-        return "Finish the room scan to show protection zones here."
-    return "Protection zones are temporarily unavailable in this camera view."
+        return "Finish the room scan to show surfaces here."
+    return "Surfaces are temporarily unavailable in this camera view."

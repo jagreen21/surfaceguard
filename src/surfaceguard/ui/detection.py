@@ -5,7 +5,6 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
-    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -22,7 +21,6 @@ from .components import GlassCard, PageHeader, StatusPill
 class DetectionScreen(QWidget):
     protection_requested = Signal(bool)
     sensitivity_changed = Signal(str)
-    cooldown_changed = Signal(float)
 
     def __init__(self) -> None:
         super().__init__()
@@ -51,16 +49,11 @@ class DetectionScreen(QWidget):
         bh.setObjectName("cardTitle")
         behaviour.box.addWidget(bh)
         self.sensitivity = QComboBox()
+        self.sensitivity.setAccessibleName("Detection sensitivity")
         self.sensitivity.addItems(["Calm", "Balanced", "Sensitive"])
         self.sensitivity.currentTextChanged.connect(self.sensitivity_changed.emit)
-        self.cooldown = QDoubleSpinBox()
-        self.cooldown.setRange(2.0, 300.0)
-        self.cooldown.setSuffix(" seconds")
-        self.cooldown.setSingleStep(5.0)
-        self.cooldown.valueChanged.connect(self.cooldown_changed.emit)
         for label, control, detail in (
             ("Sensitivity", self.sensitivity, "Balanced works well in most rooms."),
-            ("Cooldown", self.cooldown, "Minimum wait before another response."),
         ):
             cap = QLabel(label)
             cap.setObjectName("eyebrow")
@@ -70,6 +63,10 @@ class DetectionScreen(QWidget):
             copy = QVBoxLayout(); copy.addWidget(cap); copy.addWidget(help_)
             row.addLayout(copy, 1); row.addWidget(control)
             behaviour.box.addLayout(row)
+        cooldown_note = QLabel("Response timing is set separately for each surface in Rooms.")
+        cooldown_note.setObjectName("muted")
+        cooldown_note.setWordWrap(True)
+        behaviour.box.addWidget(cooldown_note)
 
         self.advanced_button = QPushButton("Advanced")
         self.advanced_button.setCheckable(True)
@@ -97,13 +94,10 @@ class DetectionScreen(QWidget):
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0); root.addWidget(scroll)
         self._state: AppState | None = None
 
-    def set_values(self, sensitivity: str, cooldown: float, detector_text: str) -> None:
+    def set_values(self, sensitivity: str, detector_text: str) -> None:
         self.sensitivity.blockSignals(True)
         self.sensitivity.setCurrentText(sensitivity)
         self.sensitivity.blockSignals(False)
-        self.cooldown.blockSignals(True)
-        self.cooldown.setValue(cooldown)
-        self.cooldown.blockSignals(False)
         self.detector_info.setText(detector_text)
 
     def render_state(self, state: AppState) -> None:
@@ -121,5 +115,4 @@ class DetectionScreen(QWidget):
 
     def _show_advanced(self, shown: bool) -> None:
         self.advanced.setVisible(shown)
-        self.advanced_button.setText("Hide Advanced" if shown else "Advanced")
-
+        self.advanced_button.setText("Hide advanced" if shown else "Advanced")

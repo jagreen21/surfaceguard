@@ -27,6 +27,7 @@ from ..health.heartbeat import Report
 from ..logging_setup import log_dir, redact_support_text, tail
 from ..update import build_info
 from . import qtutil as Q
+from .components import PageHeader
 
 TARGET_P95_MS = 1200.0
 
@@ -67,6 +68,7 @@ class DiagnosticsScreen(QWidget):
     def __init__(self, engine: Engine) -> None:
         super().__init__()
         self.engine = engine
+        self.header = PageHeader("System Health", "Live camera, detection, and response checks.")
 
         self.latency = _Tile("End-to-end, p95 — target 1200 ms (E1)", "ms")
         self.inliers = _Tile("Registration inliers — need 30 (E2)", "")
@@ -75,12 +77,11 @@ class DiagnosticsScreen(QWidget):
         self.fps = _Tile("Frames judged per second", "fps")
         self.missed = _Tile("Pet events the camera saw while video was down", "")
 
-        grid = QGridLayout()
-        grid.setSpacing(11)
-        for i, tile in enumerate(
-            (self.latency, self.inliers, self.reg_ms, self.infer_ms, self.fps, self.missed)
-        ):
-            grid.addWidget(tile, i // 3, i % 3)
+        self.tiles = (self.latency, self.inliers, self.reg_ms, self.infer_ms, self.fps, self.missed)
+        self.grid = QGridLayout()
+        self.grid.setSpacing(11)
+        for i, tile in enumerate(self.tiles):
+            self.grid.addWidget(tile, i // 3, i % 3)
 
         self.checks = QLabel("Waiting for the first check…")
         self.checks.setObjectName("mono")
@@ -129,16 +130,37 @@ class DiagnosticsScreen(QWidget):
         mbox.addLayout(support_row)
         mbox.addWidget(self.support_note)
 
-        panels = QHBoxLayout()
-        panels.setSpacing(12)
-        panels.addWidget(checks_panel, 1)
-        panels.addWidget(cam_panel, 1)
+        self.checks_panel = checks_panel
+        self.camera_panel = cam_panel
+        self.panels = QGridLayout()
+        self.panels.setSpacing(12)
+        self.panels.addWidget(checks_panel, 0, 0)
+        self.panels.addWidget(cam_panel, 0, 1)
+        self.panels.setColumnStretch(0, 1)
+        self.panels.setColumnStretch(1, 1)
+        self._narrow = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
-        root.addLayout(grid)
-        root.addLayout(panels, 1)
+        root.addWidget(self.header)
+        root.addLayout(self.grid)
+        root.addLayout(self.panels, 1)
+
+    def adapt_to_width(self, width: int) -> None:
+        narrow = width < 780
+        if narrow == self._narrow:
+            return
+        self._narrow = narrow
+        columns = 2 if narrow else 3
+        for tile in self.tiles:
+            self.grid.removeWidget(tile)
+        for index, tile in enumerate(self.tiles):
+            self.grid.addWidget(tile, index // columns, index % columns)
+        self.panels.removeWidget(self.checks_panel)
+        self.panels.removeWidget(self.camera_panel)
+        self.panels.addWidget(self.checks_panel, 0, 0)
+        self.panels.addWidget(self.camera_panel, 1 if narrow else 0, 0 if narrow else 1)
 
     def refresh(self) -> None:
         m = self.engine.metrics

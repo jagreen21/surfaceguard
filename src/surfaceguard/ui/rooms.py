@@ -26,7 +26,7 @@ class RoomsScreen(QWidget):
         super().__init__()
         self.editor = editor
         self.header = PageHeader(
-            "Rooms", "Protected surfaces belong to the room, even when more cameras are added."
+            "Rooms", "Surfaces belong to the room, even when more cameras are added."
         )
 
         room_card = GlassCard(compact=True)
@@ -34,9 +34,9 @@ class RoomsScreen(QWidget):
         self.room_name.setObjectName("roomName")
         self.room_name.editingFinished.connect(self._push_name)
         self.room_status = StatusPill("Idle", "neutral")
-        self.rescan_button = QPushButton("Rescan Room")
+        self.rescan_button = QPushButton("Rescan room")
         self.rescan_button.clicked.connect(self.rescan_requested.emit)
-        self.room_summary = QLabel("No protected surfaces yet")
+        self.room_summary = QLabel("No surfaces yet")
         self.room_summary.setObjectName("muted")
         self.camera_summary = QLabel("No camera connected")
         self.camera_summary.setObjectName("muted")
@@ -49,9 +49,9 @@ class RoomsScreen(QWidget):
         room_card.box.addWidget(self.camera_summary)
 
         surfaces_head = QHBoxLayout()
-        surfaces_title = QLabel("Protected surfaces")
+        surfaces_title = QLabel("Surfaces")
         surfaces_title.setObjectName("cardTitle")
-        self.add_button = QPushButton("Add Protection Zone")
+        self.add_button = QPushButton("Add surface")
         self.add_button.setObjectName("primary")
         self.add_button.clicked.connect(self.editor.begin_drawing)
         surfaces_head.addWidget(surfaces_title)
@@ -73,6 +73,9 @@ class RoomsScreen(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(scroll)
 
+    def adapt_to_width(self, width: int) -> None:
+        self.editor.adapt_to_width(max(0, width - 44))
+
     def _push_name(self) -> None:
         name = self.room_name.text().strip() or "Room"
         self.room_name.setText(name)
@@ -81,7 +84,7 @@ class RoomsScreen(QWidget):
     def refresh_summary(self, surface_count: int, camera_name: str, active: bool) -> None:
         self.room_summary.setText(
             "Nothing is protected yet" if surface_count == 0 else
-            f"{surface_count} protection zone{'s' if surface_count != 1 else ''}"
+            f"{surface_count} surface{'s' if surface_count != 1 else ''}"
         )
         self.camera_summary.setText(camera_name or "No camera connected")
         self.room_status.set_status("Active" if active else "Idle", "good" if active else "neutral")

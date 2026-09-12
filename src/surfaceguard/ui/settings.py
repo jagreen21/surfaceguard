@@ -140,10 +140,10 @@ class SettingsScreen(QWidget):
         startup.box.addWidget(self.launch)
 
         support = _Section(
-            "System Health",
+            "System health",
             "Surface Guard checks the camera, detector, room view, and sound while protection is active.",
         )
-        health = QPushButton("View System Health")
+        health = QPushButton("View system health")
         health.clicked.connect(self.system_health_requested.emit)
         support.box.addWidget(health)
 

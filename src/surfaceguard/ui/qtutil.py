@@ -4,6 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtGui import QColor, QFont, QImage, QPixmap
+from PySide6.QtWidgets import (
+    QAbstractButton,
+    QComboBox,
+    QDoubleSpinBox,
+    QLineEdit,
+    QSlider,
+    QSpinBox,
+    QWidget,
+)
 
 # The approved render uses a near-black blue canvas, cool translucent cards, a
 # restrained blue action colour, mint health, and coral detection overlays.
@@ -13,7 +22,7 @@ PANEL = QColor("#17222a")
 PANEL_2 = QColor("#202c35")
 GROUND = QColor("#081117")
 SIDEBAR = QColor("#0d171e")
-RULE = QColor("#2a3943")
+RULE = QColor("#40515d")
 ACCENT = QColor("#6ea7ff")
 ACCENT_DIM = QColor(88, 166, 231, 54)
 GOOD = QColor("#62e6a1")
@@ -36,6 +45,21 @@ QFrame#glassCard, QFrame#panel {{
     background: rgba(25, 36, 44, 238);
     border: 1px solid {RULE.name()};
     border-radius: 11px;
+}}
+QFrame#actionCard {{
+    background: rgba(31, 44, 54, 248);
+    border: 1px solid #607681;
+    border-radius: 11px;
+}}
+QFrame#sectionCard {{
+    background: rgba(18, 28, 35, 238);
+    border: 1px solid #344650;
+    border-radius: 8px;
+}}
+QFrame#statusCard {{
+    background: rgba(44, 48, 42, 238);
+    border: 1px solid #67705e;
+    border-radius: 9px;
 }}
 QFrame#heroFrame {{
     background: #050b0f;
@@ -66,11 +90,12 @@ QPushButton {{
 }}
 QPushButton:hover {{ background: #2b3943; border-color: #465762; }}
 QPushButton:pressed {{ background: #18242c; }}
-QPushButton:disabled {{ color: #65727a; background: #141e25; border-color: #25323a; }}
+QPushButton:disabled {{ color: #91a0a9; background: #141e25; border-color: #34434c; }}
 QPushButton#primary {{
-    background: #4f83d9; color: white; font-weight: 600; border: none; padding: 5px 16px;
+    background: #2866b2; color: white; font-weight: 600; border: 1px solid #397bc9;
+    padding: 5px 16px;
 }}
-QPushButton#primary:hover {{ background: #6193e5; }}
+QPushButton#primary:hover {{ background: #3475c4; }}
 QPushButton#secondary {{ color: {ACCENT.name()}; }}
 QPushButton#danger {{ color: {BAD.name()}; }}
 QPushButton#navButton {{
@@ -113,6 +138,11 @@ QListWidget, QTableWidget, QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {{
 QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {{ min-height: 30px; }}
 QListWidget::item {{ padding: 9px 7px; border-radius: 7px; }}
 QListWidget::item:selected {{ background: #334b60; }}
+QPushButton:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,
+QLineEdit:focus, QListWidget:focus, QTableWidget:focus, QCheckBox:focus,
+QSlider:focus, QFrame#actionCard:focus {{
+    border: 2px solid {ACCENT.name()};
+}}
 QTableWidget {{ gridline-color: transparent; }}
 QTableWidget::item {{ padding: 7px; border-bottom: 1px solid #27322b; }}
 QHeaderView::section {{
@@ -149,3 +179,20 @@ def bgr_to_pixmap(image: np.ndarray) -> QPixmap:
     h, w = rgb.shape[:2]
     qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
     return QPixmap.fromImage(qimg)
+
+
+def ensure_accessibility(root: QWidget) -> None:
+    """Give every interactive control a useful VoiceOver name when one is absent."""
+    interactive = (QAbstractButton, QComboBox, QLineEdit, QSlider, QSpinBox, QDoubleSpinBox)
+    for widget in (root, *root.findChildren(QWidget)):
+        if not isinstance(widget, interactive) or widget.accessibleName():
+            continue
+        name = ""
+        if isinstance(widget, QAbstractButton):
+            name = widget.text().replace("\n", " ").strip()
+        elif isinstance(widget, QLineEdit):
+            name = widget.placeholderText().strip()
+        name = name or widget.toolTip().strip() or widget.objectName().replace("_", " ").strip()
+        if not name:
+            name = widget.metaObject().className().removeprefix("Q")
+        widget.setAccessibleName(name)

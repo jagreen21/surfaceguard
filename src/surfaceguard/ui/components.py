@@ -106,6 +106,7 @@ class NavButton(QPushButton):
         self.setObjectName("navButton")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(label)
+        self.setAccessibleName(label)
 
     def set_compact(self, compact: bool) -> None:
         self.setText(self.symbol if compact else f"{self.symbol}   {self.label}")
@@ -121,8 +122,11 @@ class ActionCard(GlassCard):
 
     def __init__(self, eyebrow: str, title: str, detail: str = "") -> None:
         super().__init__(compact=True)
+        self.setObjectName("actionCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(title)
+        self.setAccessibleDescription(detail)
         self.eyebrow = QLabel(eyebrow)
         self.eyebrow.setObjectName("eyebrow")
         self.title = QLabel(title)

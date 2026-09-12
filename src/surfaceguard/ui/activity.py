@@ -14,6 +14,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from ..storage.activity_log import ActivityLog, Event
 from . import qtutil as Q
+from .components import PageHeader
 
 COLUMNS = ("When", "Surface", "Sound", "Why", "Latency", "Your call")
 
@@ -39,8 +41,10 @@ class ActivityScreen(QWidget):
         super().__init__()
         self.log = log
         self._events: list[Event] = []
+        self.header = PageHeader("Activity", "Review recent detections and correct mistakes.")
 
         self.table = QTableWidget(0, len(COLUMNS))
+        self.table.setAccessibleName("Activity events")
         self.table.setHorizontalHeaderLabels(COLUMNS)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -86,7 +90,7 @@ class ActivityScreen(QWidget):
         buttons.addWidget(self.correct_btn)
         buttons.addWidget(self.wrong_btn)
         side.addLayout(buttons)
-        self.advanced_btn = QPushButton("Show Advanced Details")
+        self.advanced_btn = QPushButton("Show advanced details")
         self.advanced_btn.setCheckable(True)
         self.advanced_btn.toggled.connect(self._toggle_advanced)
         side.addWidget(self.advanced_btn)
@@ -105,21 +109,45 @@ class ActivityScreen(QWidget):
         side.addWidget(forget)
         panel = QFrame()
         panel.setObjectName("panel")
-        panel.setFixedWidth(330)
+        panel.setMinimumWidth(280)
+        panel.setMaximumWidth(390)
+        self.detail_panel = panel
         panel.setLayout(side)
 
         left = QVBoxLayout()
         left.setSpacing(8)
         left.addWidget(self.summary)
         left.addWidget(self.table, 1)
+        self.activity_list = QWidget()
+        self.activity_list.setLayout(left)
 
-        root = QHBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(14)
-        root.addLayout(left, 1)
-        root.addWidget(panel)
+        self.root = QGridLayout(self)
+        self.root.setContentsMargins(14, 14, 14, 14)
+        self.root.setSpacing(14)
+        self.root.addWidget(self.header, 0, 0, 1, 2)
+        self.root.addWidget(self.activity_list, 1, 0)
+        self.root.addWidget(panel, 1, 1)
+        self.root.setColumnStretch(0, 1)
+        self.root.setRowStretch(1, 1)
+        self._narrow = False
         self._toggle_advanced(False)
         self._set_feedback_enabled(False)
+
+    def adapt_to_width(self, width: int) -> None:
+        narrow = width < 760
+        if narrow == self._narrow:
+            return
+        self._narrow = narrow
+        self.root.removeWidget(self.activity_list)
+        self.root.removeWidget(self.detail_panel)
+        if narrow:
+            self.detail_panel.setMaximumWidth(16777215)
+            self.root.addWidget(self.activity_list, 1, 0)
+            self.root.addWidget(self.detail_panel, 2, 0)
+        else:
+            self.detail_panel.setMaximumWidth(390)
+            self.root.addWidget(self.activity_list, 1, 0)
+            self.root.addWidget(self.detail_panel, 1, 1)
 
     # ------------------------------------------------------------------ render
 
@@ -161,7 +189,7 @@ class ActivityScreen(QWidget):
         self._show_selected()
 
     def _toggle_advanced(self, shown: bool) -> None:
-        self.advanced_btn.setText("Hide Advanced Details" if shown else "Show Advanced Details")
+        self.advanced_btn.setText("Hide advanced details" if shown else "Show advanced details")
         self.advanced_caption.setVisible(shown)
         self.gates.setVisible(shown)
 

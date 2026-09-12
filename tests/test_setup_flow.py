@@ -255,7 +255,7 @@ def test_rooms_screen_exposes_rescan_without_opening_diagnostics(qt_app):
     from surfaceguard.ui.surface_editor import SurfaceEditor
 
     rooms = RoomsScreen(SurfaceEditor())
-    assert rooms.rescan_button.text() == "Rescan Room"
+    assert rooms.rescan_button.text() == "Rescan room"
     assert rooms.rescan_button.isEnabled()
 
 

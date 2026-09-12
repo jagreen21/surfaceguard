@@ -19,12 +19,13 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QLockFile, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
     QMenu,
+    QMenuBar,
     QMessageBox,
     QSystemTrayIcon,
     QTabWidget,
@@ -489,8 +490,8 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
     def rescan_room(self) -> None:
         confirm = QMessageBox.question(
             self, "Scan the room again?",
-            "This replaces the room picture and clears its protection zones. "
-            "You’ll draw the zones again on the new camera views.",
+            "This replaces the room picture and clears its surfaces. "
+            "You’ll draw the surfaces again on the new camera views.",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
         )
         if confirm == QMessageBox.StandardButton.Yes:
@@ -511,7 +512,7 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
     def _on_trigger(self, decision, _result) -> None:
         self.tray.showMessage(
             "Cat on the " + decision.surface_name,
-            "Deterrent played.", QSystemTrayIcon.MessageIcon.Information, 4000,
+            "Sound response played.", QSystemTrayIcon.MessageIcon.Information, 4000,
         )
         self.activity.refresh()
         if self._review is not None and self._review.isVisible():
@@ -661,12 +662,20 @@ class MainWindow(ReviewFlow, QWidget):
         self.shell = AppShell({
             "Home": self.home, "Rooms": self.rooms, "Detection": self.detection,
             "Audio": self.audio_screen, "Camera": self.camera_screen,
-            "Devices": self.devices, "Settings": self.settings,
+            "Devices": self.devices, "Activity": self.activity, "Settings": self.settings,
+            "System Health": self.diagnostics,
         })
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        self.menu_bar = self._build_menu()
+        root.addWidget(self.menu_bar)
         root.addWidget(self.shell)
         self._wire_ui()
+        self._shortcuts: list[QShortcut] = []
+        undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
+        undo_shortcut.activated.connect(self.editor.undo)
+        self._shortcuts.append(undo_shortcut)
+        Q.ensure_accessibility(self)
 
         self.bridge = _Bridge()
         self.bridge.frame.connect(self._on_frame)
@@ -707,7 +716,6 @@ class MainWindow(ReviewFlow, QWidget):
         self.rooms.rescan_requested.connect(self.rescan_room)
         self.detection.protection_requested.connect(lambda on: self.arm() if on else self.turn_off())
         self.detection.sensitivity_changed.connect(self._on_sensitivity_changed)
-        self.detection.cooldown_changed.connect(self._on_global_cooldown)
         self.audio_screen.settings_changed.connect(self._on_audio_settings_changed)
         self.audio_screen.test_requested.connect(
             lambda: self.test_sound(self.audio_screen.current_surface)
@@ -726,6 +734,42 @@ class MainWindow(ReviewFlow, QWidget):
         self.settings.system_health_requested.connect(self.show_system_health)
         self.shell.health_requested.connect(self.show_system_health)
         self.shell.page_changed.connect(self._on_page)
+
+    def _build_menu(self) -> QMenuBar:
+        """Native application menus and discoverable keyboard navigation."""
+        bar = QMenuBar(self)
+        bar.setNativeMenuBar(True)
+        app_menu = bar.addMenu("Surface Guard")
+        show_action = app_menu.addAction("Show Surface Guard")
+        show_action.setShortcut(QKeySequence("Meta+0"))
+        show_action.triggered.connect(self._show_window)
+        app_menu.addSeparator()
+        quit_action = app_menu.addAction("Quit Surface Guard")
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        quit_action.triggered.connect(self.quit)
+
+        view_menu = bar.addMenu("View")
+        for index, name in enumerate((
+            "Home", "Rooms", "Detection", "Audio", "Camera", "Devices", "Activity", "Settings"
+        ), start=1):
+            action = view_menu.addAction(name)
+            action.setShortcut(QKeySequence(f"Meta+{index}"))
+            action.triggered.connect(lambda _checked=False, n=name: self.shell.show_page(n))
+
+        room_menu = bar.addMenu("Room")
+        rescan = room_menu.addAction("Rescan room…")
+        rescan.triggered.connect(self.rescan_room)
+        add_surface = room_menu.addAction("Add surface")
+        add_surface.triggered.connect(
+            lambda: (self.shell.show_page("Rooms"), self.editor.begin_drawing())
+        )
+        undo = room_menu.addAction("Undo surface edit")
+        undo.triggered.connect(self.editor.undo)
+
+        help_menu = bar.addMenu("Help")
+        health = help_menu.addAction("System Health")
+        health.triggered.connect(self.show_system_health)
+        return bar
 
     def _build_tray(self) -> QSystemTrayIcon:
         tray = QSystemTrayIcon(self)
@@ -856,7 +900,7 @@ class MainWindow(ReviewFlow, QWidget):
             QMessageBox.warning(self, "Camera trouble", str(exc)); return False
         if self.engine.room_map is None:
             QMessageBox.information(self, "Camera connected",
-                                    "Next, Surface Guard will look around the room so you can draw protected surfaces.")
+                                    "Next, Surface Guard will look around the room so you can draw surfaces.")
             return self.run_setup(existing_source=self.engine.source)
         self._refresh_product_ui()
         return True
@@ -931,8 +975,8 @@ class MainWindow(ReviewFlow, QWidget):
     def rescan_room(self) -> None:
         answer = QMessageBox.question(
             self, "Scan the room again?",
-            "This replaces the room picture and clears its protection zones. "
-            "You’ll draw the zones again on the new camera views.",
+            "This replaces the room picture and clears its surfaces. "
+            "You’ll draw the surfaces again on the new camera views.",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
         if answer == QMessageBox.StandardButton.Yes:
             self.run_setup(existing_source=self.engine.source)
@@ -954,7 +998,7 @@ class MainWindow(ReviewFlow, QWidget):
             self.editor.set_live_pose(result.pose)
 
     def _on_trigger(self, decision, _result) -> None:
-        self.tray.showMessage("Cat on the " + decision.surface_name, "Audio response played.",
+        self.tray.showMessage("Cat on the " + decision.surface_name, "Sound response played.",
                               QSystemTrayIcon.MessageIcon.Information, 4000)
         self.activity.refresh()
         if self._review is not None and self._review.isVisible():
@@ -980,11 +1024,6 @@ class MainWindow(ReviewFlow, QWidget):
         if hasattr(self.engine.detector, "conf"):
             self.engine.detector.conf = {"Calm": 0.52, "Balanced": 0.35, "Sensitive": 0.22}[value]
         self.prefs.save(); self._refresh_product_ui()
-
-    def _on_global_cooldown(self, seconds: float) -> None:
-        for surface in self.prefs.surfaces:
-            surface.deterrent.cooldown_s = seconds
-        self.prefs.save(); self.editor._rebuild_list(); self._refresh_audio()
 
     def _on_audio_settings_changed(self) -> None:
         self.prefs.save(); self.editor._rebuild_list(); self._refresh_product_ui()
@@ -1012,20 +1051,18 @@ class MainWindow(ReviewFlow, QWidget):
 
     def _on_page(self, name: str) -> None:
         if name == "Settings": self._refresh_settings()
+        elif name == "Activity": self.activity.refresh()
+        elif name == "System Health": self.diagnostics.refresh()
         elif name == "Audio": self._refresh_audio()
         elif name in ("Devices", "Rooms", "Camera", "Detection"): self._refresh_product_ui()
 
     def show_activity(self) -> None:
-        self.activity.refresh(); self._show_auxiliary("Recent Activity", self.activity, 980, 620)
+        self.activity.refresh()
+        self.shell.show_page("Activity")
 
     def show_system_health(self) -> None:
-        self.diagnostics.refresh(); self._show_auxiliary("System Health", self.diagnostics, 960, 610)
-
-    def _show_auxiliary(self, title: str, widget: QWidget, width: int, height: int) -> None:
-        dialog = QDialog(self); dialog.setWindowTitle(title); dialog.resize(width, height)
-        widget.setParent(dialog)
-        box = QVBoxLayout(dialog); box.setContentsMargins(0, 0, 0, 0); box.addWidget(widget)
-        dialog.exec(); widget.setParent(self)
+        self.diagnostics.refresh()
+        self.shell.show_page("System Health")
 
     def _refresh_state(self) -> None:
         state = self.engine.state.state()
@@ -1047,12 +1084,14 @@ class MainWindow(ReviewFlow, QWidget):
             f"<span style='color:#96a4ad'>{event.when}</span>    "
             f"<span style='color:#ff5c57'>●</span>  "
             f"<b>Cat detected on {html.escape(event.surface_name)}</b>    "
-            "<span style='color:#96a4ad'>Audio response played</span>",
+            "<span style='color:#96a4ad'>Sound response played</span>",
             str(self.log.thumb_dir / event.thumbnail) if event.thumbnail else None,
         ) for event in recent])
         self._refresh_product_ui()
         self._maybe_offer_review(time.time())
         if self.shell.current_name == "Settings": self._refresh_settings()
+        if self.shell.current_name == "Activity": self.activity.refresh()
+        if self.shell.current_name == "System Health": self.diagnostics.refresh()
 
     def _refresh_audio(self) -> None:
         caps = self.engine.source.capabilities
@@ -1073,7 +1112,7 @@ class MainWindow(ReviewFlow, QWidget):
         self.rooms.refresh_summary(count, camera_name, state.is_guarding)
         summary = "Nothing protected yet" if not count else ", ".join(s.name for s in self.prefs.surfaces[:2])
         if count > 2: summary += f" +{count - 2} more"
-        sound = self.prefs.surfaces[0].deterrent.sound if count else "Short chirp"
+        sound = self.prefs.surfaces[0].deterrent.sound if count else "chirp"
         target = "Camera speaker" if self.prefs.prefer_camera_speaker and caps.has_speaker else "Plays through this Mac"
         self.home.set_context(self.prefs.room_name, summary, self.prefs.detection_sensitivity,
                               sound.title(), target)
@@ -1085,11 +1124,10 @@ class MainWindow(ReviewFlow, QWidget):
         self.camera_screen.set_camera(camera_name, caps.model, online=online and configured,
                                       has_speaker=caps.has_speaker, zones=overlays[0],
                                       boxes=overlays[1], labels=overlays[2])
-        cooldown = self.prefs.surfaces[0].deterrent.cooldown_s if count else 20.0
         info = self.engine.detector.info
         detector_text = "Cat detection is ready." if info.available else \
             "Cat detection needs attention. " + (info.note or "No model is configured.")
-        self.detection.set_values(self.prefs.detection_sensitivity, cooldown, detector_text)
+        self.detection.set_values(self.prefs.detection_sensitivity, detector_text)
         devices: list[DeviceViewState] = []
         if configured:
             devices.append(DeviceViewState(
