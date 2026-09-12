@@ -170,11 +170,11 @@ class OnboardingDialog(QDialog):
                       "names are the ones you gave them in the Eufy app. You will see "
                       "its picture next, and can come back if it is the wrong one."),
         Page.CONFIRM: ("Is this the right camera?",
-                       "Point it at the counter, table or shelf you want protected, "
-                       "then leave it there."),
+                       "Use the Eufy app to point it at the counter, table or shelf "
+                       "you want protected, then leave it there."),
         Page.SCAN: ("Looking around the room",
-                    "The camera turns slowly to build one wide picture. You only draw "
-                    "your surfaces once on it."),
+                    "The camera looks a little left and right to build one wide "
+                    "picture, then returns to its starting view."),
         Page.SOUND: ("Check you can hear it",
                      "This is what plays when a cat gets on a surface."),
         Page.DONE: ("Now draw your first surface",

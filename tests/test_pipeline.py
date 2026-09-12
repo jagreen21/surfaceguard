@@ -51,6 +51,51 @@ def test_room_scan_does_not_move_a_camera_without_video():
     assert camera.moves == []
 
 
+def test_default_scan_uses_the_confirmed_view_not_the_full_mechanical_range():
+    class RecordingCamera(SyntheticCamera):
+        def __init__(self):
+            super().__init__(fps=60, backlash_px=0, noise=0)
+            self.moves = []
+
+        def move_to(self, pan, tilt=0, settle_s=0):
+            self.moves.append(float(pan))
+            return super().move_to(pan, tilt, settle_s)
+
+    camera = RecordingCamera()
+    camera.start()
+    try:
+        room = build_room_map(camera, settle_s=0)
+    finally:
+        camera.stop()
+
+    scan_moves = camera.moves[:-1]
+    assert room.keyframes
+    assert min(scan_moves) >= -60 and max(scan_moves) <= 60
+    assert camera.moves[-1] == 0, "the scan stranded the camera at its last position"
+
+
+def test_a_featureless_edge_shortens_the_map_instead_of_failing_it():
+    from dataclasses import replace
+
+    class WallAtEdgeCamera(SyntheticCamera):
+        def read(self, timeout=2.0):
+            frame = super().read(timeout)
+            if frame is not None and self.pan == 40:
+                return replace(frame, image=np.zeros_like(frame.image))
+            return frame
+
+    camera = WallAtEdgeCamera(fps=60, backlash_px=0, noise=0)
+    camera.start()
+    try:
+        room = build_room_map(camera, pan_positions=[-40, -20, 0, 20, 40], settle_s=0)
+    finally:
+        camera.stop()
+
+    assert len(room.keyframes) == 4
+    assert all(kf.pan != 40 for kf in room.keyframes)
+    assert camera.pan == 0, "the camera was left facing the featureless wall"
+
+
 @pytest.fixture(scope="module")
 def room_fixture():
     cam = SyntheticCamera(fps=60)

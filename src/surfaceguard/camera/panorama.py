@@ -16,9 +16,12 @@ import cv2
 import numpy as np
 
 from .registration import Registrar, _scale_matrix, _to_work
-from .sources.base import CameraSource
+from .sources.base import CameraSource, Frame
 
 MAX_CANVAS_PX = 40_000_000  # refuse to allocate a map bigger than this
+DEFAULT_HALF_SWEEP_DEG = 60.0
+DEFAULT_SWEEP_STEP_DEG = 20.0
+MIN_SHOT_FEATURES = 12
 
 
 @dataclass
@@ -112,10 +115,27 @@ def build_room_map(
     do not overlap enough to chain together.
     """
     caps = source.capabilities
+    angles = getattr(source, "current_angles", None)
+    start_pan, start_tilt = angles() if callable(angles) else (None, None)
+    if start_pan is None:
+        estimate = getattr(source, "dead_reckoned_angles", None)
+        if callable(estimate):
+            start_pan, estimated_tilt = estimate()
+            if start_tilt is None:
+                start_tilt = estimated_tilt
+    centre_pan = float(start_pan or 0.0)
+    centre_tilt = float(start_tilt if start_tilt is not None else tilt)
     if pan_positions is None:
         lo, hi = caps.pan_range or (-40.0, 40.0)
-        # 20 deg steps give generous overlap for a camera with a wide lens.
-        pan_positions = list(np.arange(lo + 5.0, hi - 4.0, 20.0)) if caps.has_ptz else [0.0]
+        # The mechanical range is not the useful room. On an E30 it is almost a
+        # full turn, which sent the final shots into the wall behind the camera.
+        # Scan a generous arc around the view the user just confirmed instead.
+        left = max(lo, centre_pan - DEFAULT_HALF_SWEEP_DEG)
+        right = min(hi, centre_pan + DEFAULT_HALF_SWEEP_DEG)
+        pan_positions = (
+            list(np.arange(left, right + 0.1, DEFAULT_SWEEP_STEP_DEG))
+            if caps.has_ptz else [centre_pan]
+        )
 
     reg = registrar or Registrar()
     shots: list[tuple[float | None, float | None, np.ndarray]] = []
@@ -126,17 +146,40 @@ def build_room_map(
         raise StitchError(
             "no camera picture arrived, so the room scan did not move the camera"
         )
-    for i, pan in enumerate(pan_positions):
+    try:
+        for i, pan in enumerate(pan_positions):
+            if caps.has_ptz and not source.move_to(pan, centre_tilt, settle_s=settle_s):
+                raise StitchError("the camera did not respond while looking around the room")
+            frame, features = _best_feature_frame(source, reg)
+            if frame is None:
+                raise StitchError(
+                    f"the camera stopped sending video after {i} of {len(pan_positions)} positions"
+                )
+            # A blank wall at one edge should shorten the panorama, not destroy a
+            # scan whose useful views are already good. Retry transient blur first,
+            # then omit only the genuinely textureless position.
+            if features >= MIN_SHOT_FEATURES:
+                shots.append((
+                    frame.pan if frame.pan is not None else pan,
+                    frame.tilt,
+                    frame.image,
+                ))
+            if progress:
+                progress(i + 1, len(pan_positions))
+    finally:
         if caps.has_ptz:
-            source.move_to(pan, tilt, settle_s=settle_s)
-        frame = source.read(timeout=5.0)
-        if frame is None:
-            raise StitchError(
-                f"the camera stopped sending video after {i} of {len(pan_positions)} positions"
-            )
-        shots.append((frame.pan if frame.pan is not None else pan, frame.tilt, frame.image))
-        if progress:
-            progress(i + 1, len(pan_positions))
+            # Leave the camera where setup began even when capture or stitching
+            # fails. A setup error must never strand it facing a wall.
+            try:
+                source.move_to(centre_pan, centre_tilt, settle_s=0.0)
+            except Exception:
+                pass
+
+    if not shots:
+        raise StitchError(
+            "the camera only saw a plain wall or a very dark view — point it at "
+            "the surfaces you want to protect and try again"
+        )
 
     # Chain each shot onto the first one's coordinate frame.
     chain: list[np.ndarray] = [np.eye(3)]
@@ -182,3 +225,24 @@ def build_room_map(
         )
 
     return RoomMap(canvas=canvas, keyframes=keyframes, source_name=caps.name)
+
+
+def _best_feature_frame(
+    source: CameraSource,
+    registrar: Registrar,
+    attempts: int = 3,
+) -> tuple[Frame | None, int]:
+    """Retry a blurred/blank arrival and retain the most stitchable frame."""
+    best = None
+    best_features = 0
+    for attempt in range(attempts):
+        frame = source.read(timeout=5.0 if attempt == 0 else 1.0)
+        if frame is None:
+            continue
+        keypoints, descriptors, _scale, _shape = registrar.describe(frame.image)
+        count = len(keypoints) if descriptors is not None else 0
+        if best is None or count > best_features:
+            best, best_features = frame, count
+        if count >= MIN_SHOT_FEATURES:
+            break
+    return best, best_features
