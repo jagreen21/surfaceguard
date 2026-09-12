@@ -162,6 +162,41 @@ def test_a_nonmatching_transition_starts_a_new_map_section(monkeypatch):
     assert room.pan_to_x(-15) < room.pan_to_x(0)
 
 
+def test_an_implausible_homography_starts_a_new_map_section(monkeypatch):
+    import surfaceguard.camera.panorama as panorama
+
+    original = panorama._pair_homography
+    calls = 0
+
+    def one_absurd_transform(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            # Reproduces the class of false-positive match that previously made
+            # Surface Guard attempt a hundreds-of-thousands-pixel canvas.
+            return np.array([
+                [500.0, 0.0, 696_000.0],
+                [0.0, 500.0, 951_000.0],
+                [0.0, 0.0, 1.0],
+            ]), 20
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(panorama, "_pair_homography", one_absurd_transform)
+    camera = SyntheticCamera(fps=60, backlash_px=0, noise=0)
+    camera.start()
+    try:
+        room = panorama.build_room_map(
+            camera, pan_positions=[-30, -15, 0, 15], settle_s=0
+        )
+    finally:
+        camera.stop()
+
+    assert len(room.keyframes) == 4
+    assert room.size[0] < 10_000
+    assert room.size[1] < 10_000
+    assert room.pan_to_x(-15) < room.pan_to_x(0)
+
+
 def test_surface_guard_does_not_fight_camera_owned_motion_tracking():
     from dataclasses import replace
 

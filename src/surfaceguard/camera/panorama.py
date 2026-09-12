@@ -8,6 +8,8 @@ the atlas once, and each live frame is located against its keyframes at runtime.
 
 from __future__ import annotations
 
+import logging
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -18,11 +20,19 @@ from .registration import Registrar, _scale_matrix, _to_work
 from .sources.base import CameraSource, Frame
 
 MAX_CANVAS_PX = 40_000_000  # refuse to allocate a map bigger than this
+MAX_CANVAS_DIM_PX = 32_000  # OpenCV remap uses 16-bit coordinates internally
+MIN_ATLAS_SCALE = 0.25
 DEFAULT_SWEEP_STEP_DEG = 15.0
 DEFAULT_SWEEP_MARGIN_DEG = 5.0
 MIN_STITCH_INLIERS = 18
 MIN_SHOT_FEATURES = 12
 MAP_SECTION_GAP_PX = 48
+MIN_ADJACENT_AREA_RATIO = 0.15
+MAX_ADJACENT_AREA_RATIO = 6.0
+MIN_ADJACENT_OVERLAP = 0.01
+MAX_QUAD_EDGE_RATIO = 20.0
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -105,6 +115,68 @@ def _pair_homography(
     return _scale_matrix(1.0 / scale_b) @ h_work @ _scale_matrix(scale_a), inliers
 
 
+def _projected_quad(image: np.ndarray, transform: np.ndarray) -> np.ndarray | None:
+    """Return the image boundary after ``transform``, or None if it is invalid."""
+    matrix = np.asarray(transform, dtype=np.float64)
+    if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
+        return None
+    height, width = image.shape[:2]
+    source = np.float32(
+        [[0, 0], [width, 0], [width, height], [0, height]]
+    ).reshape(-1, 1, 2)
+    try:
+        quad = cv2.perspectiveTransform(source, matrix).reshape(-1, 2)
+    except cv2.error:
+        return None
+    return quad if np.isfinite(quad).all() else None
+
+
+def _plausible_adjacent_transform(
+    current_transform: np.ndarray,
+    current_image: np.ndarray,
+    previous_transform: np.ndarray,
+    previous_image: np.ndarray,
+) -> bool:
+    """Reject homographies that cannot describe two neighbouring camera views.
+
+    RANSAC can occasionally find enough coincidental matches on repeated kitchen
+    edges to return a numerical homography that magnifies a frame by hundreds of
+    times. Inlier count alone cannot catch that failure. Adjacent sweep views must
+    retain orientation, remain convex, have comparable scale, and actually overlap.
+    """
+    current = _projected_quad(current_image, current_transform)
+    previous = _projected_quad(previous_image, previous_transform)
+    if current is None or previous is None:
+        return False
+
+    current32 = current.astype(np.float32)
+    previous32 = previous.astype(np.float32)
+    if not cv2.isContourConvex(current32) or not cv2.isContourConvex(previous32):
+        return False
+
+    current_signed = float(cv2.contourArea(current32, oriented=True))
+    previous_signed = float(cv2.contourArea(previous32, oriented=True))
+    if current_signed * previous_signed <= 0:
+        return False
+    current_area, previous_area = abs(current_signed), abs(previous_signed)
+    if current_area < 1.0 or previous_area < 1.0:
+        return False
+    area_ratio = current_area / previous_area
+    if not MIN_ADJACENT_AREA_RATIO <= area_ratio <= MAX_ADJACENT_AREA_RATIO:
+        return False
+
+    edges = np.linalg.norm(current - np.roll(current, -1, axis=0), axis=1)
+    if float(edges.min()) < 1.0 or float(edges.max() / edges.min()) > MAX_QUAD_EDGE_RATIO:
+        return False
+
+    try:
+        overlap_area, _intersection = cv2.intersectConvexConvex(current32, previous32)
+    except cv2.error:
+        return False
+    overlap_ratio = float(overlap_area) / min(current_area, previous_area)
+    return math.isfinite(overlap_ratio) and overlap_ratio >= MIN_ADJACENT_OVERLAP
+
+
 def build_room_map(
     source: CameraSource,
     pan_positions: list[float] | None = None,
@@ -174,6 +246,12 @@ def build_room_map(
                     frame.tilt,
                     frame.image,
                 ))
+            else:
+                log.warning(
+                    "Skipping featureless sweep view at pan %.1f (%d features)",
+                    float(pan),
+                    features,
+                )
             if progress:
                 progress(i + 1, len(pan_positions))
     finally:
@@ -209,10 +287,20 @@ def build_room_map(
             pair_h, _inliers = _pair_homography(
                 reg, shot[2], previous[2], min_inliers
             )
-        except StitchError:
+            candidate_h = previous_h @ pair_h
+            if not _plausible_adjacent_transform(
+                candidate_h, shot[2], previous_h, previous[2]
+            ):
+                raise StitchError("adjacent transform had implausible geometry")
+        except StitchError as exc:
+            log.warning(
+                "Starting a new room-map section at pan %s: %s",
+                shot[0],
+                exc,
+            )
             sections.append([(np.eye(3), shot)])
         else:
-            sections[-1].append((previous_h @ pair_h, shot))
+            sections[-1].append((candidate_h, shot))
 
     # Lay independent panorama sections left-to-right in one drawable atlas.
     placed: list[tuple[np.ndarray, tuple[float | None, float | None, np.ndarray]]] = []
@@ -221,9 +309,10 @@ def build_room_map(
     for section in sections:
         corners = []
         for transform, (_pan, _tilt, image) in section:
-            hh, ww = image.shape[:2]
-            quad = np.float32([[0, 0], [ww, 0], [ww, hh], [0, hh]]).reshape(-1, 1, 2)
-            corners.append(cv2.perspectiveTransform(quad, transform).reshape(-1, 2))
+            quad = _projected_quad(image, transform)
+            if quad is None:
+                raise StitchError("a room-map section contained invalid geometry")
+            corners.append(quad)
         allc = np.vstack(corners)
         x0, y0 = np.floor(allc.min(axis=0)).astype(int)
         x1, y1 = np.ceil(allc.max(axis=0)).astype(int)
@@ -238,8 +327,27 @@ def build_room_map(
         height = max(height, section_height)
 
     width = cursor_x - MAP_SECTION_GAP_PX
-    if width <= 0 or height <= 0 or width * height > MAX_CANVAS_PX:
+    if width <= 0 or height <= 0:
         raise StitchError(f"stitched map came out an implausible {width}x{height} px")
+
+    # A room with several blank transitions can legitimately contain many
+    # independent full-resolution panels. Fit a moderately oversized valid atlas
+    # into OpenCV's safe limits while keeping every original keyframe for runtime
+    # registration. Extreme scaling still indicates corrupt geometry and fails.
+    atlas_scale = min(
+        1.0,
+        math.sqrt(MAX_CANVAS_PX / float(width * height)),
+        MAX_CANVAS_DIM_PX / float(width),
+        MAX_CANVAS_DIM_PX / float(height),
+    )
+    if atlas_scale < MIN_ATLAS_SCALE:
+        raise StitchError(f"stitched map came out an implausible {width}x{height} px")
+    if atlas_scale < 1.0:
+        scale = _scale_matrix(atlas_scale)
+        placed = [(scale @ transform, shot) for transform, shot in placed]
+        width = max(1, int(math.ceil(width * atlas_scale)))
+        height = max(1, int(math.ceil(height * atlas_scale)))
+        log.info("Scaled room-map atlas to %dx%d", width, height)
 
     canvas = np.zeros((height, width, 3), np.uint8)
     filled = np.zeros((height, width), np.uint8)
