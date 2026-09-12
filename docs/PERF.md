@@ -52,10 +52,20 @@ synthetic one. That is the change that keeps the fans quiet.
 **yolov8n is 2.4× faster than yolov8m on x86_64** (21.9 vs 52.4 ms), and 2× slower
 on x86_64 than arm64 (21.9 vs ~9 for n). Shipping n to Intel was right.
 
-**RSS is the outstanding problem: 528–589 MB against a 400 MB target.** The frame
-ring buffer copies every frame at full resolution (`engine._remember_frame`), and
-at 1080p that is ~6 MB a copy, 16 deep. The strip is displayed at 640 px wide.
-This is the next thing to fix and the bench now justifies it.
+**RSS is 528–589 MB against a 400 MB target, and this bench cannot tell you why.**
+An earlier version of this file blamed the frame ring buffer. That was wrong, and
+wrong in an instructive way: the bench never constructs an Engine, so
+`_remember_frame` is never called and the ring buffer is not in these figures at
+all. The attribution came from reading the code, not from the measurement — the
+exact mistake this harness exists to prevent.
+
+The ring buffer *was* worth fixing, measured separately: 16 frames at 1080p is
+**100 MB**, now **11 MB** at review width — 9× smaller, and the strip is unchanged
+because it was always resized to that width before display.
+
+What the remaining ~528 MB actually is has not been measured. Candidates are the
+onnxruntime arena, OpenCV's allocations and the synthetic room image. Finding out
+needs the real app profiled, not this harness.
 
 **`read` at 61 ms is the synthetic camera's simulated latency**, not a real cost —
 it is what holds fps near 11 in every row. Ignore it when comparing variants; it

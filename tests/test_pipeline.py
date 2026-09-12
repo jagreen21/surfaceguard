@@ -550,3 +550,49 @@ def test_a_sweep_with_no_video_at_all_says_so_plainly():
     message = str(err.value).lower()
     assert "picture" in message or "video" in message
     assert "did not move" in message or "kept dropping" in message
+
+
+def test_the_strip_buffer_does_not_hold_full_resolution_frames():
+    """Sixteen 1080p copies is 100 MB held permanently, to feed a strip that is
+    never shown wider than REVIEW_WIDTH."""
+    from collections import deque
+
+    import numpy as np
+
+    from surfaceguard.engine import STRIP_BUFFER, Engine
+    from surfaceguard.storage.activity_log import REVIEW_WIDTH
+
+    class Frame:
+        def __init__(self, image):
+            self.image = image
+
+    engine = Engine.__new__(Engine)
+    engine._recent_frames = deque(maxlen=STRIP_BUFFER)
+    full = np.zeros((1080, 1920, 3), np.uint8)
+    for _ in range(STRIP_BUFFER):
+        Engine._remember_frame(engine, Frame(full))
+
+    held = sum(a.nbytes for a in engine._recent_frames)
+    assert engine._recent_frames[0].shape[1] == REVIEW_WIDTH
+    assert held < full.nbytes * STRIP_BUFFER / 5, f"still holding {held/1e6:.0f} MB"
+    # Aspect ratio must survive, or the strip is distorted.
+    stored = engine._recent_frames[0]
+    assert abs(stored.shape[0] / stored.shape[1] - 1080 / 1920) < 0.01
+
+
+def test_a_small_frame_is_not_upscaled():
+    from collections import deque
+
+    import numpy as np
+
+    from surfaceguard.engine import STRIP_BUFFER, Engine
+
+    class Frame:
+        def __init__(self, image):
+            self.image = image
+
+    engine = Engine.__new__(Engine)
+    engine._recent_frames = deque(maxlen=STRIP_BUFFER)
+    small = np.zeros((240, 320, 3), np.uint8)
+    Engine._remember_frame(engine, Frame(small))
+    assert engine._recent_frames[0].shape[1] == 320, "a small frame was upscaled"
