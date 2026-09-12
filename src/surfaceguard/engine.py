@@ -392,6 +392,11 @@ class Engine:
         caps = self.source.capabilities
         if not caps.has_ptz or self.room_map is None:
             return
+        # Eufy's tracker already centres the live view on motion. Issuing our own
+        # dead-reckoned patrol moves at the same time makes both controllers wrong;
+        # registration can locate the tracked picture against every map keyframe.
+        if caps.auto_tracks_motion:
+            return
         if now - self._last_replan > SCAN_REPLAN_EVERY_S:
             self._last_replan = now
             self.scan.set_plan(self.build_plan())

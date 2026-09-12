@@ -59,6 +59,7 @@ class Capabilities:
     reports_angles: bool = False
     has_speaker: bool = False
     emits_pet_events: bool = False
+    auto_tracks_motion: bool = False
     pan_range: tuple[float, float] | None = None
     tilt_range: tuple[float, float] | None = None
     notes: list[str] = field(default_factory=list)
@@ -74,6 +75,7 @@ class Capabilities:
             ("reports angles", yn(self.reports_angles)),
             ("camera speaker reachable", yn(self.has_speaker)),
             ("emits pet events", yn(self.emits_pet_events)),
+            ("camera follows motion", yn(self.auto_tracks_motion)),
         ]
         if self.pan_range:
             rows.append(("pan range", f"{self.pan_range[0]:.0f} to {self.pan_range[1]:.0f} deg"))
@@ -127,6 +129,13 @@ class CameraSource(ABC):
 
     def current_angles(self) -> tuple[float | None, float | None]:
         return (None, None)
+
+    def suspend_auto_tracking(self) -> object:
+        """Pause camera-owned steering for calibration; return a restore token."""
+        return None
+
+    def restore_auto_tracking(self, token: object) -> None:
+        """Restore the state returned by :meth:`suspend_auto_tracking`."""
 
     def play_sound_on_camera(self, name: str = "default") -> bool:
         """Play a deterrent through the camera's own speaker, if it has one.

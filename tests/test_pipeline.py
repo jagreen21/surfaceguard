@@ -51,7 +51,7 @@ def test_room_scan_does_not_move_a_camera_without_video():
     assert camera.moves == []
 
 
-def test_default_scan_uses_the_confirmed_view_not_the_full_mechanical_range():
+def test_default_scan_maps_the_full_tracking_range_and_returns_to_start():
     class RecordingCamera(SyntheticCamera):
         def __init__(self):
             super().__init__(fps=60, backlash_px=0, noise=0)
@@ -70,7 +70,8 @@ def test_default_scan_uses_the_confirmed_view_not_the_full_mechanical_range():
 
     scan_moves = camera.moves[:-1]
     assert room.keyframes
-    assert min(scan_moves) >= -60 and max(scan_moves) <= 60
+    assert min(scan_moves) <= -85 and max(scan_moves) >= 85
+    assert max(np.diff(scan_moves)) <= 15
     assert camera.moves[-1] == 0, "the scan stranded the camera at its last position"
 
 
@@ -94,6 +95,97 @@ def test_a_featureless_edge_shortens_the_map_instead_of_failing_it():
     assert len(room.keyframes) == 4
     assert all(kf.pan != 40 for kf in room.keyframes)
     assert camera.pan == 0, "the camera was left facing the featureless wall"
+
+
+def test_twenty_consistent_inliers_are_enough_for_adjacent_scan_frames(monkeypatch):
+    import cv2
+    from types import SimpleNamespace
+
+    from surfaceguard.camera.panorama import _pair_homography
+
+    points = [SimpleNamespace(pt=(float(i * 10), float((i % 5) * 12))) for i in range(20)]
+    descriptors = np.zeros((20, 32), np.uint8)
+
+    class Matcher:
+        def knnMatch(self, _a, _b, k=2):
+            return [
+                [
+                    SimpleNamespace(queryIdx=i, trainIdx=i, distance=10.0),
+                    SimpleNamespace(queryIdx=i, trainIdx=(i + 1) % 20, distance=30.0),
+                ]
+                for i in range(20)
+            ]
+
+    class RegistrarStub:
+        _matcher = Matcher()
+
+        def describe(self, _image):
+            return points, descriptors, 1.0, (100, 100)
+
+    monkeypatch.setattr(
+        cv2,
+        "findHomography",
+        lambda *_args, **_kwargs: (np.eye(3), np.ones((20, 1), np.uint8)),
+    )
+    homography, inliers = _pair_homography(
+        RegistrarStub(), np.zeros((10, 10, 3)), np.zeros((10, 10, 3)), 18
+    )
+
+    assert inliers == 20
+    assert np.allclose(homography, np.eye(3))
+
+
+def test_surface_guard_does_not_fight_camera_owned_motion_tracking():
+    from dataclasses import replace
+
+    class TrackingCamera(SyntheticCamera):
+        def __init__(self):
+            super().__init__()
+            self.moves = []
+
+        @property
+        def capabilities(self):
+            return replace(super().capabilities, auto_tracks_motion=True)
+
+        def move_to(self, pan, tilt=0, settle_s=0):
+            self.moves.append((pan, tilt))
+            return True
+
+    camera = TrackingCamera()
+    engine = Engine(camera, SyntheticDetector(camera), Preferences())
+    engine.room_map = object()
+    engine._maybe_scan(time.monotonic() + 100)
+
+    assert camera.moves == []
+
+
+def test_angleless_tracking_view_chooses_the_strongest_map_keyframe(monkeypatch):
+    from types import SimpleNamespace
+
+    from surfaceguard.camera.registration import RegistrationResult
+
+    registrar = Registrar(min_inliers=30)
+    weak = SimpleNamespace(id="weak")
+    strong = SimpleNamespace(id="strong")
+    registrar.keyframes = [weak, strong]
+    monkeypatch.setattr(
+        registrar,
+        "describe",
+        lambda _image: ([SimpleNamespace(pt=(0.0, 0.0))] * 12,
+                        np.zeros((12, 32), np.uint8), 1.0, (100, 100)),
+    )
+    monkeypatch.setattr(registrar, "_candidates", lambda _pan, _tilt: [weak, strong])
+
+    def fit(kf, *_args):
+        inliers = 35 if kf.id == "weak" else 80
+        return RegistrationResult(
+            SimpleNamespace(), inliers, inliers, 1.0, keyframe_id=kf.id
+        )
+
+    monkeypatch.setattr(registrar, "_fit", fit)
+    result = registrar.register(np.zeros((100, 100, 3), np.uint8), pan=None)
+
+    assert result.keyframe_id == "strong" and result.inliers == 80
 
 
 @pytest.fixture(scope="module")

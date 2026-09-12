@@ -19,8 +19,9 @@ from .registration import Registrar, _scale_matrix, _to_work
 from .sources.base import CameraSource, Frame
 
 MAX_CANVAS_PX = 40_000_000  # refuse to allocate a map bigger than this
-DEFAULT_HALF_SWEEP_DEG = 60.0
-DEFAULT_SWEEP_STEP_DEG = 20.0
+DEFAULT_SWEEP_STEP_DEG = 15.0
+DEFAULT_SWEEP_MARGIN_DEG = 5.0
+MIN_STITCH_INLIERS = 18
 MIN_SHOT_FEATURES = 12
 
 
@@ -105,7 +106,7 @@ def build_room_map(
     pan_positions: list[float] | None = None,
     tilt: float = 0.0,
     settle_s: float = 1.2,
-    min_inliers: int = 40,
+    min_inliers: int = MIN_STITCH_INLIERS,
     registrar: Registrar | None = None,
     progress=None,
 ) -> RoomMap:
@@ -127,11 +128,12 @@ def build_room_map(
     centre_tilt = float(start_tilt if start_tilt is not None else tilt)
     if pan_positions is None:
         lo, hi = caps.pan_range or (-40.0, 40.0)
-        # The mechanical range is not the useful room. On an E30 it is almost a
-        # full turn, which sent the final shots into the wall behind the camera.
-        # Scan a generous arc around the view the user just confirmed instead.
-        left = max(lo, centre_pan - DEFAULT_HALF_SWEEP_DEG)
-        right = min(hi, centre_pan + DEFAULT_HALF_SWEEP_DEG)
+        # Auto-tracking can point the E30 anywhere, so calibration must cover its
+        # full reachable view. Fifteen-degree steps give this real camera more
+        # overlap than the original 20-degree sweep; a plain wall frame is retried
+        # and omitted below rather than making the useful room fail.
+        left = lo + DEFAULT_SWEEP_MARGIN_DEG
+        right = hi - DEFAULT_SWEEP_MARGIN_DEG
         pan_positions = (
             list(np.arange(left, right + 0.1, DEFAULT_SWEEP_STEP_DEG))
             if caps.has_ptz else [centre_pan]
@@ -139,17 +141,21 @@ def build_room_map(
 
     reg = registrar or Registrar()
     shots: list[tuple[float | None, float | None, np.ndarray]] = []
-    # Verify video before issuing even one PTZ command. Camera control and video
-    # are separate paths on Eufy hardware; without this, a broken stream made the
-    # E30 rotate to the first sweep extreme and stop there.
-    if source.read(timeout=5.0) is None:
-        raise StitchError(
-            "no camera picture arrived, so the room scan did not move the camera"
-        )
+    suspend_tracking = getattr(source, "suspend_auto_tracking", None)
+    restore_tracking = getattr(source, "restore_auto_tracking", None)
+    tracking_token = suspend_tracking() if callable(suspend_tracking) else None
+    moved = False
     try:
+        # Verify video before issuing even one PTZ command. Camera control and
+        # video are separate paths on Eufy hardware.
+        if source.read(timeout=5.0) is None:
+            raise StitchError(
+                "no camera picture arrived, so the room scan did not move the camera"
+            )
         for i, pan in enumerate(pan_positions):
             if caps.has_ptz and not source.move_to(pan, centre_tilt, settle_s=settle_s):
                 raise StitchError("the camera did not respond while looking around the room")
+            moved = moved or caps.has_ptz
             frame, features = _best_feature_frame(source, reg)
             if frame is None:
                 raise StitchError(
@@ -167,11 +173,16 @@ def build_room_map(
             if progress:
                 progress(i + 1, len(pan_positions))
     finally:
-        if caps.has_ptz:
+        if moved:
             # Leave the camera where setup began even when capture or stitching
             # fails. A setup error must never strand it facing a wall.
             try:
                 source.move_to(centre_pan, centre_tilt, settle_s=0.0)
+            except Exception:
+                pass
+        if callable(restore_tracking):
+            try:
+                restore_tracking(tracking_token)
             except Exception:
                 pass
 

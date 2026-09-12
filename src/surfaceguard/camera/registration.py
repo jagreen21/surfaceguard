@@ -147,10 +147,18 @@ class Registrar:
             if best is None or result.inliers > best.inliers:
                 best = result
             if result.ok:
-                self._last_keyframe_id = kf.id
-                return result
+                # A camera-reported angle makes the nearest successful keyframe
+                # a trustworthy prior. The E30 does not report angles while its
+                # own motion tracker steers, so a merely adequate match must not
+                # beat a much stronger keyframe later in the full-room map.
+                strong = result.inliers >= max(60, self.min_inliers * 2)
+                if pan is not None or strong:
+                    self._last_keyframe_id = kf.id
+                    return result
 
         assert best is not None
+        if best.ok:
+            self._last_keyframe_id = best.keyframe_id
         return best
 
     def _candidates(self, pan: float | None, tilt: float | None) -> list[Keyframe]:

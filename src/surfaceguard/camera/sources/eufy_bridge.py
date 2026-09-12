@@ -194,6 +194,7 @@ class EufyBridgeCamera(CameraSource):
             reports_angles=False,
             has_speaker=bool(keys & {"speaker", "speakerVolume"}),
             emits_pet_events=bool(keys & set(PET_PROPERTIES)),
+            auto_tracks_motion=_property_bool(self._properties.get("motionTracking")),
             pan_range=(-170.0, 170.0) if ptz else None,
             tilt_range=(-35.0, 35.0) if ptz else None,
             notes=[
@@ -224,8 +225,10 @@ class EufyBridgeCamera(CameraSource):
             self._feed(event.get("buffer"), event.get("metadata"))
         elif name == "livestream started":
             logger.info("livestream started for %s", self.serial)
-        elif name == "property changed" and event.get("name") in PET_PROPERTIES:
-            if event.get("value"):
+        elif name == "property changed":
+            property_name = str(event.get("name") or "")
+            self._properties[property_name] = event.get("value")
+            if property_name in PET_PROPERTIES and event.get("value"):
                 self._publish_pet_event(
                     PetEvent(time.monotonic(), device=self.serial, raw=event)
                 )
@@ -390,6 +393,36 @@ class EufyBridgeCamera(CameraSource):
     def dead_reckoned_angles(self) -> tuple[float, float]:
         return (self._pan, self._tilt)
 
+    def suspend_auto_tracking(self) -> object:
+        enabled = _property_bool(self._properties.get("motionTracking"))
+        if not enabled:
+            return False
+        try:
+            self.client.send_wait(
+                "device.set_property", serialNumber=self.serial,
+                name="motionTracking", value=False, timeout=10.0,
+            )
+            self._properties["motionTracking"] = False
+            logger.info("paused motion tracking for room scan on %s", self.serial)
+            time.sleep(0.75)
+            return True
+        except BridgeError as exc:
+            logger.warning("could not pause motion tracking for %s: %s", self.serial, exc)
+            return False
+
+    def restore_auto_tracking(self, token: object) -> None:
+        if token is not True:
+            return
+        try:
+            self.client.send_wait(
+                "device.set_property", serialNumber=self.serial,
+                name="motionTracking", value=True, timeout=10.0,
+            )
+            self._properties["motionTracking"] = True
+            logger.info("restored motion tracking after room scan on %s", self.serial)
+        except BridgeError as exc:
+            logger.warning("could not restore motion tracking for %s: %s", self.serial, exc)
+
     def play_sound_on_camera(self, name: str = "default") -> bool:
         if not self.capabilities.has_speaker:
             return False
@@ -448,6 +481,14 @@ def _sniff_decoder_name(chunk: bytes) -> str:
         if h264_type in {7, 8}:  # SPS/PPS
             return "h264"
     return ""
+
+
+def _property_bool(value: object) -> bool:
+    if isinstance(value, dict):
+        value = value.get("value")
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _put_newest(q: "queue.Queue[Frame]", frame: Frame) -> None:

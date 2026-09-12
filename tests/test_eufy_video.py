@@ -103,3 +103,26 @@ def test_unknown_payload_gets_one_alternate_decoder_attempt():
 
     assert opened == ["hevc"]
     assert camera.video_diagnostics()["codec_override"] == "hevc"
+
+
+def test_room_scan_pauses_and_restores_eufy_motion_tracking(monkeypatch):
+    import surfaceguard.camera.sources.eufy_bridge as mod
+    from surfaceguard.camera.sources.eufy_bridge import EufyBridgeCamera
+
+    calls = []
+
+    class Client:
+        def send_wait(self, command, **payload):
+            calls.append((command, payload))
+            return {}
+
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+    camera = EufyBridgeCamera(client=Client(), serial="T8417P1")
+    camera._properties = {"motionTracking": True}
+
+    assert camera.capabilities.auto_tracks_motion
+    token = camera.suspend_auto_tracking()
+    assert token is True and not camera.capabilities.auto_tracks_motion
+    camera.restore_auto_tracking(token)
+    assert camera.capabilities.auto_tracks_motion
+    assert [call[1]["value"] for call in calls] == [False, True]

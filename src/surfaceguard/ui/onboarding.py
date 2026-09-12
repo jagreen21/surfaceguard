@@ -173,8 +173,8 @@ class OnboardingDialog(QDialog):
                        "Use the Eufy app to point it at the counter, table or shelf "
                        "you want protected, then leave it there."),
         Page.SCAN: ("Looking around the room",
-                    "The camera looks a little left and right to build one wide "
-                    "picture, then returns to its starting view."),
+                    "The camera maps every direction it can follow a cat, then "
+                    "returns to its starting view."),
         Page.SOUND: ("Check you can hear it",
                      "This is what plays when a cat gets on a surface."),
         Page.DONE: ("Now draw your first surface",
