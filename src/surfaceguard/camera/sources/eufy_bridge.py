@@ -378,6 +378,16 @@ class EufyBridgeCamera(CameraSource):
         if not (force or silent or not self._stream_live):
             return False
         self._last_restart = now
+
+        # A dead socket cannot carry a start_livestream. The bridge process is
+        # restarted by its supervisor after a crash, which takes this connection
+        # with it, so the connection has to be checked before the stream.
+        if not self.client.connected:
+            if not self.client.reconnect():
+                self.last_error = "Lost the connection to the camera service."
+                return False
+            self.client.add_handler(self._on_event)
+
         logger.info("restarting the video stream for %s", self.serial)
         try:
             self._start_livestream()

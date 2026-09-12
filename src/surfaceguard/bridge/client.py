@@ -25,6 +25,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
+from ..logging_setup import get as _get_logger
+
+logger = _get_logger("bridge.client")
+
 SCHEMA_VERSION = 21
 DEFAULT_TIMEOUT = 15.0
 # Eufy's v6 login is slow before it says anything useful, and slower on an older
@@ -205,6 +209,38 @@ class BridgeClient:
     @property
     def receiving_events(self) -> bool:
         return self._listening
+
+    def reconnect(self, timeout: float = 12.0) -> bool:
+        """Rebuild the connection after the bridge restarted underneath us.
+
+        The supervisor restarts the bridge process on a crash, which kills this
+        socket. Nothing used to rebuild it: the read loop exited, the driver went
+        FAILED, and every later call failed on a dead socket — so one bridge
+        restart ended video permanently even though the service came back.
+
+        The Eufy session lives in the bridge's own persistent state, so signing in
+        again needs no password and no one present.
+        """
+        logger.info("rebuilding the connection to the camera service")
+        try:
+            self.close()
+        except Exception:
+            pass
+        try:
+            self.connect(timeout=timeout)
+        except BridgeError as exc:
+            logger.warning("could not reach the camera service: %s", exc)
+            return False
+        try:
+            state = self.connect_driver(timeout=CONNECT_TIMEOUT)
+        except BridgeError as exc:
+            logger.warning("could not sign in again: %s", exc)
+            return False
+        if state.phase is not DriverPhase.CONNECTED:
+            logger.warning("sign-in did not complete after reconnecting: %s", state.message)
+            return False
+        logger.info("reconnected to the camera service")
+        return True
 
     def devices(self) -> list[dict]:
         """Cameras the account can see. Empty until the driver has connected.

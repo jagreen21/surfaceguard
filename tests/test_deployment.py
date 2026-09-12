@@ -671,3 +671,81 @@ def test_device_list_handles_serial_only_entries():
     assert _describe({"name": "Kitchen", "model": "T8417"}) == {
         "name": "Kitchen", "model": "T8417"}
     assert _describe({}) == {"name": "", "model": ""}
+
+
+def test_the_camera_reconnects_after_the_bridge_restarts():
+    """The supervisor restarts the bridge process on a crash, which kills the
+    websocket. Nothing used to rebuild it, so one restart ended video for good
+    even though the service came back — the app just reported a lost connection."""
+    from surfaceguard.bridge.client import DriverPhase, DriverState
+    from surfaceguard.camera.sources.eufy_bridge import EufyBridgeCamera
+
+    class DeadThenAlive:
+        """A client whose socket has died and can be rebuilt."""
+
+        def __init__(self):
+            self.connected = False
+            self.driver = DriverState(phase=DriverPhase.FAILED, message="gone")
+            self.reconnects = 0
+            self.handlers = []
+            self.commands = []
+
+        def reconnect(self, timeout: float = 12.0) -> bool:
+            self.reconnects += 1
+            self.connected = True
+            self.driver = DriverState(phase=DriverPhase.CONNECTED)
+            return True
+
+        def add_handler(self, handler):
+            self.handlers.append(handler)
+
+        def remove_handler(self, handler):
+            pass
+
+        def send_wait(self, command, timeout=15.0, **payload):
+            self.commands.append(command)
+            return {}
+
+        def send(self, command, **payload):
+            self.commands.append(command)
+
+    client = DeadThenAlive()
+    camera = EufyBridgeCamera(client=client, serial="T8417P1", model="T8417")
+    assert camera.ensure_streaming(force=True)
+    assert client.reconnects == 1, "it must rebuild the socket before streaming"
+    assert "device.start_livestream" in client.commands
+    assert client.handlers, "it must start listening again after reconnecting"
+
+
+def test_a_stream_restart_is_rate_limited():
+    """A camera that refuses to stream must not be hammered."""
+    from surfaceguard.bridge.client import DriverPhase, DriverState
+    from surfaceguard.camera.sources.eufy_bridge import EufyBridgeCamera
+
+    class Live:
+        connected = True
+        driver = DriverState(phase=DriverPhase.CONNECTED)
+
+        def __init__(self):
+            self.starts = 0
+
+        def add_handler(self, handler):
+            pass
+
+        def remove_handler(self, handler):
+            pass
+
+        def send_wait(self, command, timeout=15.0, **payload):
+            if command == "device.start_livestream":
+                self.starts += 1
+            return {}
+
+        def send(self, command, **payload):
+            pass
+
+    client = Live()
+    camera = EufyBridgeCamera(client=client, serial="T8417P1", model="T8417")
+    camera.ensure_streaming(force=True)
+    first = client.starts
+    camera.ensure_streaming()          # immediately after: inside the cooldown
+    assert client.starts == first, "restarts must be rate limited"
