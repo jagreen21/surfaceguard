@@ -792,3 +792,17 @@ def test_a_stream_that_never_delivers_a_frame_is_restarted():
 
     assert camera.ensure_streaming(), "a stream that never delivered was left alone"
     assert client.starts == 1
+
+
+def test_add_note_actually_reaches_activity(tmp_path, monkeypatch):
+    """Shipped once as dead code: the engine called add_note, it did not exist,
+    and the AttributeError was swallowed by a broad except — so the release note
+    claimed a fix that did nothing."""
+    from surfaceguard.storage import activity_log as mod
+
+    monkeypatch.setattr(mod, "support_dir", lambda: tmp_path)
+    log = mod.ActivityLog()
+    log.add_note("Saw a cat — seen, but not standing on a surface")
+    rows = log.recent(limit=5)
+    assert rows and "not standing" in rows[0].reason
+    assert rows[0].fired is False

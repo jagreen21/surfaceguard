@@ -135,6 +135,19 @@ class ActivityLog:
 
     # ------------------------------------------------------------------ writes
 
+    def add_note(self, message: str, surface_name: str = "") -> int:
+        """A plain line in Activity for something seen but not acted on.
+
+        An empty Activity tab while a cat is plainly being detected explains
+        nothing at all — which is exactly what a surface drawn in the wrong place,
+        or a camera view that cannot be located, looks like from the outside.
+        Callers rate-limit these so they cannot bury real events.
+        """
+        return self.record(
+            surface_id="", surface_name=surface_name, fired=False,
+            reason=message, save_thumbnail=False,
+        )
+
     def record(
         self,
         surface_id: str,
