@@ -485,3 +485,68 @@ def test_engine_flags_a_pet_event_arriving_while_video_is_down(room_fixture, tmp
     cam.inject_pet_event()
     engine._drain_pet_events(None, time.monotonic())
     assert engine.missed_pet_events == 1
+
+
+def test_a_sweep_survives_positions_that_send_no_video():
+    """Eufy ends the stream on its own, and panning is one of the things that does
+    it. Losing video at one position used to abort the whole scan, discarding the
+    positions that worked — the same situation as a blank wall, which is skipped."""
+    import numpy as np
+
+    from surfaceguard.camera.panorama import build_room_map
+    from surfaceguard.camera.sources.synthetic import SyntheticCamera
+
+    class Flaky(SyntheticCamera):
+        """Sends no video at two of the sweep positions."""
+
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+            self.restarts = 0
+            self.dead_until = 0
+
+        def ensure_streaming(self, force: bool = False) -> bool:
+            self.restarts += 1
+            return False          # restart does not help; the position is skipped
+
+        def read(self, timeout: float = 2.0):
+            self.reads += 1
+            if 6 <= self.reads <= 11:
+                return None
+            return super().read(timeout)
+
+    camera = Flaky()
+    camera.start()
+    try:
+        room = build_room_map(camera, settle_s=0.0)
+    finally:
+        camera.stop()
+
+    assert room is not None, "the scan threw away every good position"
+    assert room.size[0] > 0 and room.size[1] > 0
+    assert camera.restarts > 0, "it should have tried to recover the stream first"
+
+
+def test_a_sweep_with_no_video_at_all_says_so_plainly():
+    from surfaceguard.camera.panorama import StitchError, build_room_map
+    from surfaceguard.camera.sources.synthetic import SyntheticCamera
+
+    class Dead(SyntheticCamera):
+        def ensure_streaming(self, force: bool = False) -> bool:
+            return False
+
+        def read(self, timeout: float = 2.0):
+            return None
+
+    camera = Dead()
+    camera.start()
+    try:
+        with pytest.raises(StitchError) as err:
+            build_room_map(camera, settle_s=0.0)
+    finally:
+        camera.stop()
+    # It refuses before moving the camera at all, which is the right order: a
+    # scan that cannot see must not leave the camera pointing somewhere new.
+    message = str(err.value).lower()
+    assert "picture" in message or "video" in message
+    assert "did not move" in message or "kept dropping" in message

@@ -31,6 +31,12 @@ logger = get_logger("camera.eufy")
 
 DIR_ROTATE_RIGHT, DIR_ROTATE_LEFT, DIR_ROTATE_UP, DIR_ROTATE_DOWN = 0, 1, 2, 3
 
+# How long video may be silent before the stream is presumed dead. Below the
+# heartbeat's six-second frame-age limit, so a restart is attempted before the app
+# tells her protection has stopped.
+STREAM_SILENCE_S = 4.0
+RESTART_COOLDOWN_S = 8.0
+
 # Seeded, then measured per model by tools/phase0.py.
 # A camera needs a moment to release a stream before it will start another.
 RELEASE_SETTLE_S = 2.5
@@ -67,6 +73,10 @@ class EufyBridgeCamera(CameraSource):
         self._first_video_at: float | None = None
         self._requested_at: float | None = None
         self._decode_errors = 0
+        self._stream_live = False
+        self._last_frame_at: float | None = None
+        self._last_restart = 0.0
+        self.restarts = 0
         self._decoder_codec = ""
         self._reported_codec = ""
         self._sniffed_codec = ""
@@ -116,6 +126,7 @@ class EufyBridgeCamera(CameraSource):
         self._requested_at = time.monotonic()
         try:
             self._start_livestream()
+            self._stream_live = True
         except BridgeError as exc:
             # One retry after telling the camera to stop: the usual reason a start
             # is refused is a stream this app itself left open a moment ago.
@@ -134,6 +145,9 @@ class EufyBridgeCamera(CameraSource):
                     "is open in the Eufy app on a phone — close it there and try "
                     f"again. ({exc})"
                 ) from exc
+
+    def _mark_live(self) -> None:
+        self._stream_live = True
 
     def _start_livestream(self) -> None:
         logger.info("requesting livestream for %s (%s)", self.serial, self.model or "unknown model")
@@ -235,6 +249,11 @@ class EufyBridgeCamera(CameraSource):
         elif name == "livestream stopped":
             self.last_error = "The camera stopped the video stream."
             logger.warning("livestream stopped for %s", self.serial)
+            # Eufy ends the stream on its own — when the camera pans, when the P2P
+            # session times out, when the phone app takes it. Nothing used to
+            # restart it, so the first drop ended video for good and the heartbeat
+            # reported a lost connection six seconds later.
+            self._stream_live = False
 
     def _feed(self, buffer: object, metadata: object = None) -> None:
         chunk = _decode_buffer(buffer)
@@ -330,6 +349,8 @@ class EufyBridgeCamera(CameraSource):
     def _emit(self, av_frame) -> None:
         image = av_frame.to_ndarray(format="bgr24")
         now = time.monotonic()
+        self._last_frame_at = now
+        self._stream_live = True
         if self._first_video_at is None:
             self._first_video_at = now
         _put_newest(self._frames, Frame(
@@ -341,12 +362,42 @@ class EufyBridgeCamera(CameraSource):
             tilt=None,
         ))
 
+    def ensure_streaming(self, force: bool = False) -> bool:
+        """Restart the livestream if it has stopped or gone silent.
+
+        Rate-limited: a camera that refuses to stream must not be hammered, and a
+        restart that is already in flight must not be issued twice.
+        """
+        if self._stop.is_set():
+            return False
+        now = time.monotonic()
+        if now - self._last_restart < RESTART_COOLDOWN_S and not force:
+            return False
+        silent = (self._last_frame_at is not None
+                  and now - self._last_frame_at > STREAM_SILENCE_S)
+        if not (force or silent or not self._stream_live):
+            return False
+        self._last_restart = now
+        logger.info("restarting the video stream for %s", self.serial)
+        try:
+            self._start_livestream()
+            self._stream_live = True
+            self.restarts += 1
+            return True
+        except SourceError as exc:
+            self.last_error = str(exc)
+            logger.warning("could not restart the stream: %s", exc)
+            return False
+
     def read(self, timeout: float = 2.0) -> Frame | None:
         deadline = time.monotonic() + timeout
         newest: Frame | None = None
         try:
             newest = self._frames.get(timeout=max(0.0, deadline - time.monotonic()))
         except queue.Empty:
+            # Silence is the symptom of a stream Eufy has quietly ended. Try to
+            # bring it back before the heartbeat declares the connection lost.
+            self.ensure_streaming()
             return None
         # Always judge the freshest frame: a backlog is worse than a dropped frame.
         while True:

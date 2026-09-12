@@ -29,6 +29,9 @@ MIN_SHOT_FEATURES = 12
 MAP_TILE_GAP_PX = 24
 ATLAS_TARGET_ASPECT = 16.0 / 9.0
 
+# How long to let a restarted stream settle before asking for a frame again.
+STREAM_RECOVERY_S = 2.0
+
 log = logging.getLogger(__name__)
 
 
@@ -146,15 +149,32 @@ def build_room_map(
             raise StitchError(
                 "no camera picture arrived, so the room scan did not move the camera"
             )
+        missed_video = 0
         for i, pan in enumerate(pan_positions):
             if caps.has_ptz and not source.move_to(pan, centre_tilt, settle_s=settle_s):
                 raise StitchError("the camera did not respond while looking around the room")
             moved = moved or caps.has_ptz
             frame, features = _best_feature_frame(source, reg)
             if frame is None:
-                raise StitchError(
-                    f"the camera stopped sending video after {i} of {len(pan_positions)} positions"
+                # Eufy ends the stream on its own, and panning is one of the things
+                # that does it. Losing video at one position is not a reason to
+                # throw away a sweep whose other positions were fine — it is the
+                # same situation as a blank wall, and gets the same treatment:
+                # restart, retry once, then move on without it.
+                restart = getattr(source, "ensure_streaming", None)
+                if callable(restart) and restart(force=True):
+                    log.info("video stopped at pan %.1f; restarted and retrying", float(pan))
+                    time.sleep(STREAM_RECOVERY_S)
+                    frame, features = _best_feature_frame(source, reg)
+            if frame is None:
+                missed_video += 1
+                log.warning(
+                    "No video at pan %.1f (%d of %d positions had none)",
+                    float(pan), missed_video, len(pan_positions),
                 )
+                if progress:
+                    progress(i + 1, len(pan_positions))
+                continue
             # A blank wall at one edge should shorten the panorama, not destroy a
             # scan whose useful views are already good. Retry transient blur first,
             # then omit only the genuinely textureless position.
@@ -186,6 +206,14 @@ def build_room_map(
             except Exception:
                 pass
 
+    if shots and missed_video:
+        log.info("room map built from %d of %d positions (%d had no video)",
+                 len(shots), len(pan_positions), missed_video)
+    if not shots and missed_video:
+        raise StitchError(
+            "the camera kept dropping its video while looking around. Close the "
+            "Eufy app on your phone if it is open, then try again."
+        )
     if not shots:
         raise StitchError(
             "the camera only saw a plain wall or a very dark view — point it at "
