@@ -8,6 +8,8 @@ frame, which is literally what the gates will test.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from PySide6.QtCore import QPointF, QRect, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap, QPolygonF
@@ -34,6 +36,9 @@ from ..geometry.surface import Surface
 from . import qtutil as Q
 
 HANDLE_R = 8
+# Exactly four corners, so the plane model is exact rather than approximated
+# from an arbitrary polygon by _extreme_quad.
+QUAD_POINTS = 4
 MIN_POINTS = 3
 
 
@@ -43,6 +48,12 @@ class MapCanvas(QWidget):
     surfaces_changed = Signal()
     selection_changed = Signal(object)  # Surface | None
     undo_available_changed = Signal(bool)
+    # Four corners are down; the panel can offer to name it.
+    quad_complete = Signal()
+    # Raised rather than reaching into parent(): a canvas should not know what is
+    # hosting it, and self.parent() silently breaks the moment one is reparented.
+    commit_requested = Signal()
+    delete_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -86,8 +97,20 @@ class MapCanvas(QWidget):
         self.selection_changed.emit(surface)
         self.update()
 
-    def start_drawing(self) -> None:
+    def start_drawing(self, quad: bool = True) -> None:
+        """Begin a new surface.
+
+        ``quad`` asks for exactly four corners, which is what the plane model
+        uses: Surface.quad falls back to _extreme_quad() for anything else, and
+        that moves the corners — measured on a six-point counter, the derived quad
+        covered 93% of the drawn area with every corner shifted. The homography
+        built from those corners is what predicts how tall a cat standing there
+        should look, so a freeform shape quietly degrades the scale gate. Counters,
+        tables, desks and shelves are rectangles; four corners is not a limitation
+        for them, it is the right answer.
+        """
         self.draw_mode = True
+        self.quad_mode = quad
         self.drawing = []
         self.select(None)
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -154,6 +177,11 @@ class MapCanvas(QWidget):
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self.update()
+
+    def _push_undo(self, surface: Surface) -> None:
+        """Remember a polygon before changing it, so every edit is reversible."""
+        self._undo_stack.append((surface, surface.polygon.copy()))
+        self.undo_available_changed.emit(True)
 
     def undo_last_edit(self) -> None:
         """Restore the polygon from before the most recent vertex drag."""
@@ -273,17 +301,25 @@ class MapCanvas(QWidget):
             if event.button() == Qt.MouseButton.LeftButton:
                 self.drawing.append(self.view_to_map(pos))
                 self.update()
+                if self.quad_mode and len(self.drawing) == QUAD_POINTS:
+                    self.quad_complete.emit()
             return
 
         if event.button() != Qt.MouseButton.LeftButton:
             return
         # A handle beats a body hit, so corners stay draggable inside the shape.
-        if self.selected is not None:
-            for i, pt in enumerate(self.selected.polygon):
-                if (self.map_to_view(pt) - pos).manhattanLength() <= HANDLE_R * 2.4:
-                    self._drag = (self.selected, i)
-                    self._drag_origin = self.selected.polygon.copy()
-                    return
+        # Euclidean, not Manhattan: Manhattan distance makes the grab area a
+        # diamond, so a corner is catchable from further away diagonally than
+        # straight on, which feels arbitrary. And every visible surface is tested,
+        # not only the selected one — otherwise adjusting a neighbour means
+        # selecting it first, which is not discoverable.
+        handle = self._handle_at(pos)
+        if handle is not None:
+            surface, index = handle
+            self.select(surface)
+            self._drag = (surface, index)
+            self._drag_origin = surface.polygon.copy()
+            return
         for surface in reversed(self.surfaces):
             poly = QPolygonF([self.map_to_view(pt) for pt in surface.polygon])
             if poly.containsPoint(pos, Qt.FillRule.OddEvenFill):
@@ -293,6 +329,64 @@ class MapCanvas(QWidget):
         if not self._map.isNull():
             self._pan_drag = (pos, QPointF(self._pan))
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def _handle_at(self, pos: QPointF) -> tuple[Surface, int] | None:
+        """The nearest vertex within grabbing distance, on any visible surface."""
+        best: tuple[float, Surface, int] | None = None
+        reach = float(HANDLE_R) * 2.0
+        ordered = ([self.selected] if self.selected is not None else []) + [
+            s for s in reversed(self.surfaces) if s is not self.selected
+        ]
+        for surface in ordered:
+            for i, pt in enumerate(surface.polygon):
+                delta = self.map_to_view(pt) - pos
+                distance = math.hypot(delta.x(), delta.y())
+                if distance <= reach and (best is None or distance < best[0]):
+                    best = (distance, surface, i)
+            if best is not None and surface is self.selected:
+                break          # the selected surface wins ties
+        return (best[1], best[2]) if best else None
+
+    def _edge_at(self, pos: QPointF) -> tuple[Surface, int, tuple[float, float]] | None:
+        """The edge under the cursor, and where on it, for inserting a vertex."""
+        reach = float(HANDLE_R) * 1.5
+        for surface in ([self.selected] if self.selected is not None else []):
+            points = [self.map_to_view(pt) for pt in surface.polygon]
+            for i in range(len(points)):
+                a, b = points[i], points[(i + 1) % len(points)]
+                vx, vy = b.x() - a.x(), b.y() - a.y()
+                length_sq = vx * vx + vy * vy
+                if length_sq <= 1e-6:
+                    continue
+                t = ((pos.x() - a.x()) * vx + (pos.y() - a.y()) * vy) / length_sq
+                if not 0.05 < t < 0.95:
+                    continue
+                cx, cy = a.x() + t * vx, a.y() + t * vy
+                if math.hypot(pos.x() - cx, pos.y() - cy) <= reach:
+                    return surface, i + 1, self.view_to_map(QPointF(cx, cy))
+        return None
+
+    def insert_vertex_at(self, pos: QPointF) -> bool:
+        """Add a corner in the middle of an edge, so a shape can be refined."""
+        found = self._edge_at(pos)
+        if found is None:
+            return False
+        surface, index, point = found
+        self._push_undo(surface)
+        surface.polygon = np.insert(surface.polygon, index, np.asarray(point, float), axis=0)
+        self.surfaces_changed.emit()
+        self.update()
+        return True
+
+    def delete_vertex(self, surface: Surface, index: int) -> bool:
+        """Remove a corner, never below the minimum a polygon needs."""
+        if len(surface.polygon) <= MIN_POINTS:
+            return False
+        self._push_undo(surface)
+        surface.polygon = np.delete(surface.polygon, index, axis=0)
+        self.surfaces_changed.emit()
+        self.update()
+        return True
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self.draw_mode:
@@ -330,15 +424,22 @@ class MapCanvas(QWidget):
             self.set_zoom(self._zoom * (1.25 if delta > 0 else 0.8), event.position())
             event.accept()
 
-    def mouseDoubleClickEvent(self, _event) -> None:  # noqa: N802
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        # Double-clicking an edge adds a corner there, so an existing shape can be
+        # refined instead of redrawn.
+        if not self.draw_mode and self.insert_vertex_at(event.position()):
+            return
+        return self._double_click_finish(event)
+
+    def _double_click_finish(self, _event) -> None:
         if self.draw_mode and len(self.drawing) >= MIN_POINTS:
-            self.parent().commit_drawing()  # type: ignore[attr-defined]
+            self.commit_requested.emit()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         key = event.key()
         if self.draw_mode:
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                self.parent().commit_drawing()  # type: ignore[attr-defined]
+                self.commit_requested.emit()
             elif key == Qt.Key.Key_Escape:
                 self.cancel_drawing()
             elif key == Qt.Key.Key_Backspace and self.drawing:
@@ -346,7 +447,7 @@ class MapCanvas(QWidget):
                 self.update()
             return
         if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) and self.selected is not None:
-            self.parent().delete_selected()  # type: ignore[attr-defined]
+            self.delete_requested.emit()
 
 
 class SurfaceEditor(QWidget):
@@ -361,6 +462,10 @@ class SurfaceEditor(QWidget):
         self.canvas.surfaces_changed.connect(self._on_canvas_changed)
         self.canvas.selection_changed.connect(self._on_selected)
         self.canvas.undo_available_changed.connect(self._set_undo_available)
+        self.canvas.commit_requested.connect(self.commit_drawing)
+        self.canvas.delete_requested.connect(self.delete_selected)
+        # Four corners placed: name it, rather than waiting for Enter.
+        self.canvas.quad_complete.connect(self.commit_drawing)
 
         self.list = QListWidget()
         self.list.setAccessibleName("Surfaces")
