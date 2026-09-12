@@ -107,6 +107,8 @@ class Engine:
 
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._pause_requested = threading.Event()
+        self._paused = threading.Event()
         self._lock = threading.RLock()
         self._last_heartbeat = 0.0
         self._last_replan = 0.0
@@ -153,19 +155,33 @@ class Engine:
 
     # -------------------------------------------------------------- lifecycle
 
-    def start(self) -> None:
+    def start(self, source_already_started: bool = False) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self.source.start()
+        self._pause_requested.clear()
+        self._paused.clear()
+        if not source_already_started:
+            self.source.start()
         self._thread = threading.Thread(target=self._run, name="sg-engine", daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 3.0) -> None:
         self._stop.set()
+        self._pause_requested.clear()
         if self._thread:
             self._thread.join(timeout=timeout)
         self.source.stop()
+
+    def pause_processing(self, timeout: float = 3.0) -> bool:
+        """Let setup temporarily own the already-running camera stream."""
+        if not self.running:
+            return False
+        self._pause_requested.set()
+        return self._paused.wait(timeout)
+
+    def resume_processing(self) -> None:
+        self._pause_requested.clear()
 
     @property
     def running(self) -> bool:
@@ -176,6 +192,11 @@ class Engine:
     def _run(self) -> None:
         interval = 1.0 / max(1.0, self.prefs.target_fps)
         while not self._stop.is_set():
+            if self._pause_requested.is_set():
+                self._paused.set()
+                self._stop.wait(0.05)
+                continue
+            self._paused.clear()
             cycle_started = time.monotonic()
             try:
                 self._tick()
@@ -186,6 +207,7 @@ class Engine:
             slack = interval - (time.monotonic() - cycle_started)
             if slack > 0:
                 self._stop.wait(slack)
+        self._paused.clear()
 
     def _tick(self) -> None:
         frame = self.source.read(timeout=2.0)

@@ -20,6 +20,7 @@ from .surface_editor import SurfaceEditor
 
 class RoomsScreen(QWidget):
     room_name_changed = Signal(str)
+    rescan_requested = Signal()
 
     def __init__(self, editor: SurfaceEditor, room_name: str = "Kitchen") -> None:
         super().__init__()
@@ -33,12 +34,15 @@ class RoomsScreen(QWidget):
         self.room_name.setObjectName("roomName")
         self.room_name.editingFinished.connect(self._push_name)
         self.room_status = StatusPill("Idle", "neutral")
+        self.rescan_button = QPushButton("Rescan Room")
+        self.rescan_button.clicked.connect(self.rescan_requested.emit)
         self.room_summary = QLabel("No protected surfaces yet")
         self.room_summary.setObjectName("muted")
         self.camera_summary = QLabel("No camera connected")
         self.camera_summary.setObjectName("muted")
         title_row = QHBoxLayout()
         title_row.addWidget(self.room_name, 1)
+        title_row.addWidget(self.rescan_button)
         title_row.addWidget(self.room_status)
         room_card.box.addLayout(title_row)
         room_card.box.addWidget(self.room_summary)
@@ -81,4 +85,3 @@ class RoomsScreen(QWidget):
         )
         self.camera_summary.setText(camera_name or "No camera connected")
         self.room_status.set_status("Active" if active else "Idle", "good" if active else "neutral")
-

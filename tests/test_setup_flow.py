@@ -236,6 +236,29 @@ def test_app_calls_run_setup_the_way_the_dialog_accepts_it():
     assert "existing_source" in inspect.signature(OnboardingDialog.__init__).parameters
 
 
+def test_rescan_reuses_the_active_camera_instead_of_signing_in_again():
+    import inspect
+
+    from surfaceguard import app
+
+    for window in (app._LegacyMainWindow, app.MainWindow):
+        source = inspect.getsource(window.rescan_room)
+        assert "existing_source=self.engine.source" in source
+        setup_source = inspect.getsource(window.run_setup)
+        assert "if not same_source" in setup_source, (
+            "rescan must not overwrite the saved Eufy account and camera identity"
+        )
+
+
+def test_rooms_screen_exposes_rescan_without_opening_diagnostics(qt_app):
+    from surfaceguard.ui.rooms import RoomsScreen
+    from surfaceguard.ui.surface_editor import SurfaceEditor
+
+    rooms = RoomsScreen(SurfaceEditor())
+    assert rooms.rescan_button.text() == "Rescan Room"
+    assert rooms.rescan_button.isEnabled()
+
+
 def test_every_heading_and_label_exists_for_every_page(qt_app):
     """A page with no heading is a screen that reads as broken."""
     dialog = OnboardingDialog(allow_demo=True)

@@ -197,6 +197,7 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
         self.log = log
         self.updater = updater or Updater()
         self.supervisor = supervisor
+        self.bridge_client = getattr(engine.source, "client", None)
         engine.updater = self.updater
         engine.bridge = supervisor
         self._quitting = False
@@ -307,7 +308,7 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
             self.connect_camera()
             return
         if not state.has_map:
-            self.run_setup()
+            self.run_setup(existing_source=self.engine.source if self.engine.running else None)
             return
         if not state.has_surfaces:
             self.tabs.setCurrentWidget(self.editor)
@@ -394,7 +395,7 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
                 "Next, Surface Guard will look around the room so you can draw the "
                 "surfaces you want protected.",
             )
-            return self.run_setup()
+            return self.run_setup(existing_source=self.engine.source)
         return True
 
     def _prepare_for_update(self, version: str) -> None:
@@ -418,20 +419,33 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
 
     # ------------------------------------------------------------------- setup
 
-    def run_setup(self) -> bool:
+    def run_setup(self, existing_source=None) -> bool:
         # Re-running setup should default to however the camera is already set up.
+        started_for_setup = False
+        if existing_source is not None and not self.engine.running:
+            try:
+                existing_source.start()
+                started_for_setup = True
+            except SourceError:
+                existing_source = None
+        paused = bool(existing_source is not None and self.engine.pause_processing())
         dialog = OnboardingDialog(
             self, allow_demo=True, preselect=str((self.prefs.camera or {}).get("kind", "")),
+            existing_source=existing_source,
             supervisor=self.supervisor, client=getattr(self, "bridge_client", None),
         )
         dialog.bind_player(lambda: self.engine.player.play("chirp", 0.6))
         if dialog.exec() != OnboardingDialog.DialogCode.Accepted or dialog.room is None:
+            if paused:
+                self.engine.resume_processing()
+            elif started_for_setup:
+                self.engine.start(source_already_started=True)
             if dialog.source is not None and dialog.source is not self.engine.source:
                 dialog.source.stop()
             return False
 
-        was_running = self.engine.running
-        if was_running:
+        same_source = dialog.source is self.engine.source
+        if self.engine.running and not same_source:
             self.engine.stop()
         if dialog.client is not None:
             self.bridge_client = dialog.client
@@ -440,12 +454,23 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
             self.engine.bridge = self.supervisor
         if dialog.source is not None:
             self.engine.source = dialog.source
-            self.prefs.camera = {
-                "kind": dialog.choice().kind,
-                "url": dialog.choice().url,
-                "serial": dialog.choice().serial,
-            }
-            if isinstance(self.engine.detector, SyntheticDetector):
+            if not same_source:
+                if dialog.choice().kind == "eufy":
+                    self.prefs.camera = {
+                        "kind": "eufy",
+                        "username": dialog.account.username,
+                        "country": dialog.account.country,
+                        "serial": str(getattr(dialog.source, "serial", "")),
+                        "model": str(getattr(dialog.source, "model", "")),
+                        "name": str(getattr(dialog.source, "device_name", "")),
+                    }
+                else:
+                    self.prefs.camera = {
+                        "kind": dialog.choice().kind,
+                        "url": dialog.choice().url,
+                        "serial": dialog.choice().serial,
+                    }
+            if not same_source and isinstance(self.engine.detector, SyntheticDetector):
                 self.engine.detector = _make_detector(self.prefs, dialog.source)
         self.engine.set_room_map(dialog.room)
         self.engine.set_surfaces([])
@@ -453,6 +478,10 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
         save_room_map(dialog.room)
         self.prefs.save()
         self.reload_from_prefs()
+        if paused:
+            self.engine.resume_processing()
+        elif started_for_setup and not self.engine.running:
+            self.engine.start(source_already_started=True)
         self.tabs.setCurrentWidget(self.editor)
         self.editor.begin_drawing()
         return True
@@ -465,7 +494,7 @@ class _LegacyMainWindow(ReviewFlow, QWidget):
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
         )
         if confirm == QMessageBox.StandardButton.Yes:
-            self.run_setup()
+            self.run_setup(existing_source=self.engine.source)
 
     def reload_from_prefs(self) -> None:
         canvas = self.engine.room_map.canvas if self.engine.room_map else None
@@ -610,6 +639,7 @@ class MainWindow(ReviewFlow, QWidget):
         self.engine, self.prefs, self.log = engine, prefs, log
         self.updater = updater or Updater()
         self.supervisor = supervisor
+        self.bridge_client = getattr(engine.source, "client", None)
         engine.updater, engine.bridge = self.updater, supervisor
         self._quitting = False
         self._caffeinate: subprocess.Popen | None = None
@@ -674,6 +704,7 @@ class MainWindow(ReviewFlow, QWidget):
             lambda: self.test_sound(self.editor.canvas.selected)
         )
         self.rooms.room_name_changed.connect(self._on_room_name_changed)
+        self.rooms.rescan_requested.connect(self.rescan_room)
         self.detection.protection_requested.connect(lambda on: self.arm() if on else self.turn_off())
         self.detection.sensitivity_changed.connect(self._on_sensitivity_changed)
         self.detection.cooldown_changed.connect(self._on_global_cooldown)
@@ -726,7 +757,7 @@ class MainWindow(ReviewFlow, QWidget):
         if not (self.prefs.camera or {}).get("kind"):
             self.connect_camera(); return
         if not state.has_map:
-            self.run_setup(); return
+            self.run_setup(existing_source=self.engine.source if self.engine.running else None); return
         if not state.has_surfaces:
             self.shell.show_page("Rooms"); self.editor.begin_drawing(); return
         state.arm()
@@ -826,7 +857,7 @@ class MainWindow(ReviewFlow, QWidget):
         if self.engine.room_map is None:
             QMessageBox.information(self, "Camera connected",
                                     "Next, Surface Guard will look around the room so you can draw protected surfaces.")
-            return self.run_setup()
+            return self.run_setup(existing_source=self.engine.source)
         self._refresh_product_ui()
         return True
 
@@ -839,6 +870,14 @@ class MainWindow(ReviewFlow, QWidget):
         self.prefs.launch_at_login = set_launch_at_login(on); self.prefs.save()
 
     def run_setup(self, existing_source=None) -> bool:
+        started_for_setup = False
+        if existing_source is not None and not self.engine.running:
+            try:
+                existing_source.start()
+                started_for_setup = True
+            except SourceError:
+                existing_source = None
+        paused = bool(existing_source is not None and self.engine.pause_processing())
         dialog = OnboardingDialog(self, allow_demo=True,
                                   preselect=str((self.prefs.camera or {}).get("kind", "")),
                                   existing_source=existing_source,
@@ -846,10 +885,15 @@ class MainWindow(ReviewFlow, QWidget):
                                   client=getattr(self, "bridge_client", None))
         dialog.bind_player(lambda: self.engine.player.play("chirp", 0.6))
         if dialog.exec() != OnboardingDialog.DialogCode.Accepted or dialog.room is None:
+            if paused:
+                self.engine.resume_processing()
+            elif started_for_setup:
+                self.engine.start(source_already_started=True)
             if dialog.source is not None and dialog.source is not self.engine.source:
                 dialog.source.stop()
             return False
-        if self.engine.running:
+        same_source = dialog.source is self.engine.source
+        if self.engine.running and not same_source:
             self.engine.stop()
         if dialog.client is not None:
             self.bridge_client = dialog.client
@@ -858,13 +902,29 @@ class MainWindow(ReviewFlow, QWidget):
             self.engine.bridge = self.supervisor
         if dialog.source is not None:
             self.engine.source = dialog.source
-            self.prefs.camera = {"kind": dialog.choice().kind, "url": dialog.choice().url,
-                                 "serial": dialog.choice().serial}
-            self.engine.detector = _make_detector(self.prefs, dialog.source)
+            if not same_source:
+                if dialog.choice().kind == "eufy":
+                    self.prefs.camera = {
+                        "kind": "eufy", "username": dialog.account.username,
+                        "country": dialog.account.country,
+                        "serial": str(getattr(dialog.source, "serial", "")),
+                        "model": str(getattr(dialog.source, "model", "")),
+                        "name": str(getattr(dialog.source, "device_name", "")),
+                    }
+                else:
+                    self.prefs.camera = {
+                        "kind": dialog.choice().kind, "url": dialog.choice().url,
+                        "serial": dialog.choice().serial,
+                    }
+                self.engine.detector = _make_detector(self.prefs, dialog.source)
         self.engine.set_room_map(dialog.room)
         self.engine.set_surfaces([])
         self.prefs.surfaces = []
         save_room_map(dialog.room); self.prefs.save(); self.reload_from_prefs()
+        if paused:
+            self.engine.resume_processing()
+        elif started_for_setup and not self.engine.running:
+            self.engine.start(source_already_started=True)
         self.shell.show_page("Rooms"); self.editor.begin_drawing()
         return True
 
@@ -875,7 +935,7 @@ class MainWindow(ReviewFlow, QWidget):
             "You’ll draw the zones again on the new camera views.",
             QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
         if answer == QMessageBox.StandardButton.Yes:
-            self.run_setup()
+            self.run_setup(existing_source=self.engine.source)
 
     def reload_from_prefs(self) -> None:
         canvas = self.engine.room_map.canvas if self.engine.room_map else None
@@ -1290,6 +1350,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("restarted after updating to %s", updated_to)
 
     source, supervisor = _make_source(prefs)
+    configured_source_ready = source is not None
     if source is None:
         from .camera.sources.synthetic import SyntheticCamera
         source = SyntheticCamera()
@@ -1312,7 +1373,20 @@ def main(argv: list[str] | None = None) -> int:
         return _selftest(app, window, engine, Path(args.selftest))
 
     if room is None:
-        QTimer.singleShot(300, window.run_setup)
+        # The account session and selected camera already survived the update;
+        # start that source and hand it straight to the room scan. Only an
+        # actually expired/failed session should send her back through sign-in.
+        if configured_source_ready:
+            try:
+                engine.start()
+            except SourceError as exc:
+                logger.warning("saved camera could not resume for room scan: %s", exc)
+        QTimer.singleShot(
+            300,
+            lambda: window.run_setup(
+                existing_source=engine.source if engine.running else None
+            ),
+        )
     else:
         try:
             engine.start()

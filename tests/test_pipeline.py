@@ -191,6 +191,28 @@ def test_surface_guard_does_not_fight_camera_owned_motion_tracking():
     assert camera.moves == []
 
 
+def test_room_rescan_can_temporarily_own_the_live_camera_stream():
+    camera = SyntheticCamera(fps=60, backlash_px=0, noise=0)
+    engine = Engine(camera, SyntheticDetector(camera), Preferences())
+    engine.start()
+    try:
+        deadline = time.monotonic() + 1.0
+        while engine.metrics.frames == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert engine.pause_processing()
+        paused_at = engine.metrics.frames
+        time.sleep(0.12)
+        assert engine.metrics.frames == paused_at
+        assert camera.read(timeout=0.2) is not None, "the rescan lost the live stream"
+        engine.resume_processing()
+        deadline = time.monotonic() + 1.0
+        while engine.metrics.frames == paused_at and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert engine.metrics.frames > paused_at
+    finally:
+        engine.stop()
+
+
 def test_angleless_tracking_view_chooses_the_strongest_map_keyframe(monkeypatch):
     from types import SimpleNamespace
 
