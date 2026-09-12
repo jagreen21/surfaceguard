@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from ..engine import Engine
 from ..health.heartbeat import Report
-from ..logging_setup import log_dir, tail
+from ..logging_setup import log_dir, redact_support_text, tail
 from ..update import build_info
 from . import qtutil as Q
 
@@ -215,7 +215,7 @@ class DiagnosticsScreen(QWidget):
                 lines += ["", "camera service (last lines):"]
                 lines += [f"  {line[:180]}" for line in recent]
         lines += ["", "app log (last lines):", tail(40)]
-        return "\n".join(lines)
+        return redact_support_text("\n".join(lines))
 
     def _copy_diagnostics(self) -> None:
         QApplication.clipboard().setText(self.diagnostics_text())

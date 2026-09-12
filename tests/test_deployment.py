@@ -197,6 +197,15 @@ def test_bridge_log_lines_are_stripped_of_colour():
     assert _strip_ansi("\x1b[37m2026-09-11\x1b[39m INFO ready") == "2026-09-11 INFO ready"
 
 
+def test_support_reports_redact_accounts_and_camera_serials():
+    from surfaceguard.logging_setup import redact_support_text
+
+    report = redact_support_text("jasmine@example.com T8417P123456789 model T8417")
+    assert "jasmine" not in report and "P123456789" not in report
+    assert "EMAIL-REDACTED" in report and "T-REDACTED" in report
+    assert "model T8417" in report
+
+
 def test_device_filtering():
     assert looks_like_camera({"model": "T8417", "name": "Indoor Cam"})
     assert not looks_like_camera({"model": "T8520", "name": "Smart Lock"})

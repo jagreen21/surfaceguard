@@ -397,6 +397,9 @@ class _FakeCamera:
     def read(self, timeout=0):
         return None
 
+    def video_diagnostics(self):
+        return {"chunks": 0, "decode_errors": 0}
+
 
 def test_picking_a_different_camera_stops_the_first_stream(qt_app, no_keychain):
     """Eufy serves one livestream at a time. Starting a second without stopping the
@@ -434,6 +437,43 @@ def test_a_black_preview_cannot_start_a_camera_sweep(qt_app, no_keychain):
     dialog._advance()
     assert dialog.page is Page.CONFIRM
     assert "picture" in dialog.status.text().lower()
+
+
+def test_preview_distinguishes_decoder_failure_from_no_video(qt_app, no_keychain):
+    dialog = OnboardingDialog(allow_demo=True)
+    camera = _FakeCamera()
+    camera.video_diagnostics = lambda: {"chunks": 12, "bytes": 500_000, "decode_errors": 12}
+    dialog.source = camera
+    dialog.chosen = {"name": "Kitchen", "serialNumber": "T8417P123456789", "model": "T8417"}
+    dialog._go(Page.CONFIRM)
+    dialog._pump_preview()
+    dialog._preview_started -= 2.0
+    dialog._preview_tick()
+
+    assert "sending video" in dialog.status.text().lower()
+    assert dialog.copy_support_btn.isVisibleTo(dialog)
+    assert not dialog.next_btn.isEnabled()
+
+
+def test_setup_support_report_is_redacted(qt_app, no_keychain, monkeypatch):
+    import surfaceguard.ui.onboarding as mod
+
+    dialog = OnboardingDialog(allow_demo=True)
+    camera = _FakeCamera()
+    camera.video_diagnostics = lambda: {"chunks": 12, "decoder": "hevc"}
+    dialog.source = camera
+    dialog.chosen = {
+        "name": "Kitchen",
+        "serialNumber": "T8417P123456789",
+        "model": "T8417",
+    }
+    monkeypatch.setattr(mod, "tail", lambda _lines: "jasmine@example.com T8417P123456789")
+    dialog._copy_support_report()
+    report = qt_app.clipboard().text()
+
+    assert "jasmine" not in report and "P123456789" not in report
+    assert "EMAIL-REDACTED" in report and "T-REDACTED" in report
+    assert "camera model: T8417" in report
 
 
 def test_the_picker_shows_friendly_model_names(qt_app, no_keychain):

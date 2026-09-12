@@ -1,6 +1,6 @@
 """Codec handling at the Python/Node livestream boundary."""
 
-from surfaceguard.camera.sources.eufy_bridge import _decoder_name
+from surfaceguard.camera.sources.eufy_bridge import _decoder_name, _sniff_decoder_name
 
 
 def test_bridge_h264_name_maps_to_avc_decoder():
@@ -15,6 +15,13 @@ def test_bridge_h265_name_maps_to_hevc_decoder():
 
 def test_missing_codec_keeps_the_bridge_default():
     assert _decoder_name(None) == "h264"
+
+
+def test_payload_parameter_sets_override_incorrect_codec_metadata():
+    assert _sniff_decoder_name(b"junk\x00\x00\x00\x01\x67\x64") == "h264"
+    assert _sniff_decoder_name(b"\x00\x00\x00\x01\x40\x01") == "hevc"
+    assert _sniff_decoder_name(b"\x00\x00\x01\x42\x01") == "hevc"
+    assert _sniff_decoder_name(b"not annex b") == ""
 
 
 def test_first_h265_chunk_replaces_the_initial_h264_decoder():
@@ -39,3 +46,60 @@ def test_first_h265_chunk_replaces_the_initial_h264_decoder():
 
     assert opened == ["hevc"]
     assert camera._decoder_codec == "hevc"
+
+
+def test_hevc_payload_overrides_an_incorrect_h264_label():
+    from surfaceguard.camera.sources.eufy_bridge import EufyBridgeCamera
+
+    camera = EufyBridgeCamera(client=None, serial="T8417P1")
+    opened = []
+
+    class Decoder:
+        def parse(self, _chunk):
+            return []
+
+    def open_decoder(codec):
+        opened.append(codec)
+        camera._decoder_codec = codec
+        camera._decoder = Decoder()
+
+    camera._decoder = Decoder()
+    camera._decoder_codec = "h264"
+    camera._open_decoder = open_decoder
+    camera._feed(
+        b"\x00\x00\x00\x01\x40\x01payload",
+        {"videoCodec": "H264", "videoWidth": 1920},
+    )
+
+    assert opened == ["hevc"]
+    assert camera._decoder_codec == "hevc"
+    assert camera.video_diagnostics()["reported_codec"] == "h264"
+    assert camera.video_diagnostics()["sniffed_codec"] == "hevc"
+
+
+def test_unknown_payload_gets_one_alternate_decoder_attempt():
+    from surfaceguard.camera.sources.eufy_bridge import EufyBridgeCamera
+
+    camera = EufyBridgeCamera(client=None, serial="T8417P1")
+    opened = []
+
+    class RejectingDecoder:
+        def parse(self, _chunk):
+            raise ValueError("wrong codec")
+
+    class AcceptingDecoder:
+        def parse(self, _chunk):
+            return []
+
+    def open_decoder(codec):
+        opened.append(codec)
+        camera._decoder_codec = codec
+        camera._decoder = AcceptingDecoder() if codec == "hevc" else RejectingDecoder()
+
+    camera._decoder = RejectingDecoder()
+    camera._decoder_codec = "h264"
+    camera._open_decoder = open_decoder
+    camera._feed(b"payload without parameter sets", {"videoCodec": "H264"})
+
+    assert opened == ["hevc"]
+    assert camera.video_diagnostics()["codec_override"] == "hevc"

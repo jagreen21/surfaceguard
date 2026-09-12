@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import platform
+import re
 import sys
 from pathlib import Path
 
@@ -23,6 +24,8 @@ MAX_BYTES = 2_000_000
 BACKUPS = 3
 
 _configured = False
+_EMAIL = re.compile(r"[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}")
+_EUFY_SERIAL = re.compile(r"\bT[A-Z0-9]{8,}\b", re.IGNORECASE)
 
 
 def log_dir() -> Path:
@@ -102,3 +105,8 @@ def tail(lines: int = 200) -> str:
     except OSError as exc:
         return f"(could not read the log: {exc})"
     return "\n".join(text[-lines:])
+
+
+def redact_support_text(text: str) -> str:
+    """Remove account and device IDs while retaining useful model numbers."""
+    return _EUFY_SERIAL.sub("T-REDACTED", _EMAIL.sub("EMAIL-REDACTED", text))

@@ -68,7 +68,13 @@ class EufyBridgeCamera(CameraSource):
         self._requested_at: float | None = None
         self._decode_errors = 0
         self._decoder_codec = ""
+        self._reported_codec = ""
+        self._sniffed_codec = ""
+        self._codec_override = ""
+        self._codec_fallback_attempted = False
         self._first_chunk_logged = False
+        self._video_chunks = 0
+        self._video_bytes = 0
         self.last_error = ""
 
     # ---------------------------------------------------------------- lifecycle
@@ -84,7 +90,13 @@ class EufyBridgeCamera(CameraSource):
         self._first_video_at = None
         self._decode_errors = 0
         self._decoder_codec = ""
+        self._reported_codec = ""
+        self._sniffed_codec = ""
+        self._codec_override = ""
+        self._codec_fallback_attempted = False
         self._first_chunk_logged = False
+        self._video_chunks = 0
+        self._video_bytes = 0
         self.last_error = ""
         while not self._frames.empty():
             try:
@@ -225,10 +237,22 @@ class EufyBridgeCamera(CameraSource):
         chunk = _decode_buffer(buffer)
         if not chunk or self._stop.is_set():
             return
+        self._video_chunks += 1
+        self._video_bytes += len(chunk)
         details = metadata if isinstance(metadata, dict) else {}
-        codec = _decoder_name(details.get("videoCodec"))
+        reported = _decoder_name(details.get("videoCodec"))
+        sniffed = _sniff_decoder_name(chunk)
+        self._reported_codec = reported
+        if sniffed:
+            self._sniffed_codec = sniffed
+        # Some T8417 firmware reports streamType=1/H264 even when its Annex-B
+        # payload contains HEVC parameter sets. Conclusive bytes beat metadata.
+        codec = self._codec_override or sniffed or self._sniffed_codec or reported
         if codec != self._decoder_codec:
-            logger.info("video codec changed for %s: %s (%s)", self.serial, codec, details)
+            logger.info(
+                "video codec selected for %s: %s reported=%s sniffed=%s",
+                self.serial, codec, reported, sniffed or "unknown",
+            )
             try:
                 self._open_decoder(codec)
             except SourceError as exc:
@@ -244,10 +268,9 @@ class EufyBridgeCamera(CameraSource):
                 self.serial, len(chunk), codec, details.get("videoWidth", "?"),
                 details.get("videoHeight", "?"), details.get("videoFPS", "?"),
             )
+            logger.info("first video bytes for %s: %s", self.serial, chunk[:24].hex())
         try:
-            for packet in self._decoder.parse(chunk):
-                for frame in self._decoder.decode(packet):
-                    self._emit(frame)
+            self._decode_chunk(chunk)
         except Exception as exc:
             # A corrupt packet mid-stream is normal over P2P; drop it and carry on.
             # A sustained run of them is what the heartbeat's video check catches.
@@ -257,6 +280,49 @@ class EufyBridgeCamera(CameraSource):
                     "video decode error %d for %s using %s: %s",
                     self._decode_errors, self.serial, self._decoder_codec, exc,
                 )
+            if (
+                self._first_video_at is None
+                and not self._codec_fallback_attempted
+                and not self._sniffed_codec
+            ):
+                self._codec_fallback_attempted = True
+                alternate = "hevc" if self._decoder_codec == "h264" else "h264"
+                logger.warning(
+                    "trying alternate %s decoder for %s after %s rejected the payload",
+                    alternate, self.serial, self._decoder_codec,
+                )
+                try:
+                    self._open_decoder(alternate)
+                    self._decode_chunk(chunk)
+                    # Retain the alternate even when later metadata repeats the
+                    # incorrect codec label.
+                    self._codec_override = alternate
+                except Exception as alternate_exc:
+                    logger.warning(
+                        "alternate %s decoder also rejected video for %s: %s",
+                        alternate, self.serial, alternate_exc,
+                    )
+
+    def _decode_chunk(self, chunk: bytes) -> None:
+        if self._decoder is None:
+            return
+        for packet in self._decoder.parse(chunk):
+            for frame in self._decoder.decode(packet):
+                self._emit(frame)
+
+    def video_diagnostics(self) -> dict[str, object]:
+        """Image-free counters suitable for a redacted support report."""
+        return {
+            "reported_codec": self._reported_codec or "unknown",
+            "sniffed_codec": self._sniffed_codec or "unknown",
+            "decoder": self._decoder_codec or "none",
+            "codec_override": self._codec_override or "none",
+            "chunks": self._video_chunks,
+            "bytes": self._video_bytes,
+            "decode_errors": self._decode_errors,
+            "frames": self._seq,
+            "stream_error": self.last_error or "none",
+        }
 
     def _emit(self, av_frame) -> None:
         image = av_frame.to_ndarray(format="bgr24")
@@ -360,6 +426,28 @@ def _decoder_name(value: object) -> str:
         return "hevc"
     name = str(value or "H264").upper().replace(".", "")
     return "hevc" if name in {"H265", "HEVC"} else "h264"
+
+
+def _sniff_decoder_name(chunk: bytes) -> str:
+    """Identify Annex-B AVC/HEVC parameter sets without trusting metadata."""
+    limit = min(len(chunk), 512)
+    for index in range(max(0, limit - 3)):
+        if chunk[index:index + 4] == b"\x00\x00\x00\x01":
+            header_at = index + 4
+        elif chunk[index:index + 3] == b"\x00\x00\x01":
+            header_at = index + 3
+        else:
+            continue
+        if header_at >= len(chunk):
+            continue
+        header = chunk[header_at]
+        h264_type = header & 0x1F
+        h265_type = (header >> 1) & 0x3F
+        if h265_type in {32, 33, 34}:  # VPS/SPS/PPS
+            return "hevc"
+        if h264_type in {7, 8}:  # SPS/PPS
+            return "h264"
+    return ""
 
 
 def _put_newest(q: "queue.Queue[Frame]", frame: Frame) -> None:

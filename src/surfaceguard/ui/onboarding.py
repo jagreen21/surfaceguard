@@ -18,6 +18,7 @@ the camera is pointing — is the one thing the flow dwells on.
 from __future__ import annotations
 
 import base64
+import platform
 import time
 from dataclasses import dataclass
 from enum import IntEnum
@@ -25,6 +26,7 @@ from enum import IntEnum
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFormLayout,
@@ -45,6 +47,8 @@ from ..bridge.credentials import EufyAccount
 from ..bridge.supervisor import BridgeSupervisor
 from ..camera.panorama import RoomMap, StitchError, build_room_map
 from ..camera.sources.base import CameraSource, SourceError
+from ..logging_setup import redact_support_text, tail
+from ..update import build_info
 from . import qtutil as Q
 from .home import LiveView
 
@@ -365,6 +369,16 @@ class OnboardingDialog(QDialog):
         box.setContentsMargins(0, 0, 0, 0)
         self.preview = LiveView()
         box.addWidget(self.preview, 1)
+        support = QHBoxLayout()
+        self.copy_support_btn = QPushButton("Copy support report")
+        self.copy_support_btn.clicked.connect(self._copy_support_report)
+        self.copy_support_btn.setVisible(False)
+        self.copy_support_note = QLabel("")
+        self.copy_support_note.setObjectName("dim")
+        support.addWidget(self.copy_support_btn)
+        support.addWidget(self.copy_support_note)
+        support.addStretch(1)
+        box.addLayout(support)
         return page
 
     def _page_scan(self, _allow_demo: bool) -> QWidget:
@@ -786,6 +800,8 @@ class OnboardingDialog(QDialog):
             self._preview_timer.timeout.connect(self._preview_tick)
         self._preview_frames = 0
         self._preview_started = time.monotonic()
+        self.copy_support_btn.setVisible(False)
+        self.copy_support_note.clear()
         self.next_btn.setEnabled(False)
         self._preview_timer.start()
         self._preview_tick()
@@ -802,6 +818,7 @@ class OnboardingDialog(QDialog):
             self.preview.update_result(FrameResult(frame=frame, pose=None), [])
             if self._preview_frames == 1:
                 self._say("")
+                self.copy_support_btn.setVisible(False)
                 self.next_btn.setEnabled(True)
             return
         waited = time.monotonic() - self._preview_started
@@ -810,6 +827,22 @@ class OnboardingDialog(QDialog):
             if stream_error:
                 self._say(stream_error + " Go Back and try this camera again.", bad=True)
                 self.next_btn.setEnabled(False)
+                self.copy_support_btn.setVisible(True)
+                return
+            snapshot = getattr(self.source, "video_diagnostics", None)
+            diagnostics = snapshot() if callable(snapshot) else {}
+            if (
+                waited >= 1.0
+                and int(diagnostics.get("chunks", 0)) > 0
+                and int(diagnostics.get("decode_errors", 0)) > 0
+            ):
+                self._say(
+                    "The camera is sending video, but Surface Guard cannot decode "
+                    "its picture yet. Copy the support report and send it to us.",
+                    bad=True,
+                )
+                self.next_btn.setEnabled(False)
+                self.copy_support_btn.setVisible(True)
                 return
             if waited < PREVIEW_PATIENCE_S:
                 self._say(f"Waiting for the picture… ({waited:.0f}s)")
@@ -820,6 +853,32 @@ class OnboardingDialog(QDialog):
                     "camera again.",
                     bad=True,
                 )
+                self.copy_support_btn.setVisible(True)
+
+    def _copy_support_report(self) -> None:
+        diagnostics = {}
+        if self.source is not None:
+            snapshot = getattr(self.source, "video_diagnostics", None)
+            if callable(snapshot):
+                diagnostics = snapshot()
+        lines = [
+            f"Surface Guard {build_info.VERSION} ({build_info.UPDATE_CHANNEL})",
+            f"macOS {platform.mac_ver()[0]} on {platform.machine()}",
+            f"camera model: {str((self.chosen or {}).get('model') or 'unknown')}",
+            "video: " + " ".join(f"{key}={value}" for key, value in diagnostics.items()),
+        ]
+        if self.supervisor is not None:
+            status = self.supervisor.status
+            lines.append(
+                f"bridge: running={status.running} listening={status.listening} "
+                f"lan_unreachable={status.lan_unreachable} restarts={status.restarts}"
+            )
+            recent = self.supervisor.logs(30)
+            if recent:
+                lines += ["", "camera service:", *recent]
+        lines += ["", "app log:", tail(100)]
+        QApplication.clipboard().setText(redact_support_text("\n".join(lines)))
+        self.copy_support_note.setText("Copied — paste it into your support message.")
 
     def _stop_preview(self) -> None:
         if self._preview_timer is not None:
