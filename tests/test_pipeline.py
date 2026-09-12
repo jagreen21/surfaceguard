@@ -596,3 +596,57 @@ def test_a_small_frame_is_not_upscaled():
     small = np.zeros((240, 320, 3), np.uint8)
     Engine._remember_frame(engine, Frame(small))
     assert engine._recent_frames[0].shape[1] == 320, "a small frame was upscaled"
+
+
+def test_a_stale_heartbeat_is_not_evidence_of_health():
+    """The reported failure: "all systems online" with no camera. The heartbeat
+    only runs inside the engine loop, so when that loop stalled the last good
+    report was displayed forever — the app claiming to protect on a check that ran
+    minutes ago. That is the invariant this whole design exists to hold."""
+    import time as _t
+
+    from surfaceguard.health.heartbeat import Metrics, run_checks
+    from surfaceguard.state import REPORT_STALE_AFTER_S, Phase, StateStore
+
+    store = StateStore(has_map=True, has_surfaces=True)
+    store.arm()
+    metrics = Metrics(last_frame_at=_t.monotonic(), frames=100, inliers=180,
+                      registered=True, inference_ms=20)
+    store.report = run_checks(metrics, audio_ok=True)
+    assert store.state().phase is Phase.GUARDING, "a fresh passing report guards"
+
+    # The loop stops. Nothing updates the report; it still says everything passed.
+    store.report.at -= REPORT_STALE_AFTER_S + 1     # report.at is wall clock
+    state = store.state()
+    assert state.phase is Phase.PROBLEM, "a stale report was treated as current"
+    assert "stopped checking" in state.detail.lower()
+    assert state.remedy
+
+
+def test_a_camera_that_never_sent_a_frame_is_not_online_forever():
+    """`last_frame_at == 0.0 or recent` counted "no frame has ever arrived" as
+    online, so a camera that never delivered anything reported Online
+    indefinitely — which is what put "all systems online" on screen with no
+    picture."""
+    import time as _t
+
+    from surfaceguard import app as mod
+
+    now = _t.monotonic()
+
+    def online(running: bool, last_frame_at: float, started_at: float) -> bool:
+        if not running:
+            return False
+        if last_frame_at:
+            return (now - last_frame_at) <= mod.CAMERA_OFFLINE_AFTER_S
+        return (now - started_at) <= mod.FIRST_FRAME_GRACE_S
+
+    assert online(True, 0.0, now - 1), "still starting: may look online"
+    assert not online(True, 0.0, now - mod.FIRST_FRAME_GRACE_S - 1), (
+        "a camera that never produced a frame is not online"
+    )
+    assert online(True, now - 1, now - 600), "frames arriving: online"
+    assert not online(True, now - mod.CAMERA_OFFLINE_AFTER_S - 1, now - 600), (
+        "frames stopped: offline"
+    )
+    assert not online(False, now - 1, now - 600), "engine not running: offline"

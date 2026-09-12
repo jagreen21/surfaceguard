@@ -15,6 +15,11 @@ from dataclasses import dataclass, field
 from .health.heartbeat import Report
 
 
+# The engine writes a heartbeat report every 20 s. Two missed in a row means
+# the loop that produces them is not running, whatever the last one said.
+REPORT_STALE_AFTER_S = 50.0
+
+
 class Intent(enum.Enum):
     """What the user asked for."""
 
@@ -171,6 +176,22 @@ class StateStore:
             )
 
         report = self.report
+        # A report that stopped being updated is not evidence of health. The
+        # heartbeat only runs inside the engine loop, so if that loop stalls or the
+        # camera dies, the last good report would otherwise be displayed forever —
+        # the app claiming to protect on the strength of a check that ran minutes
+        # ago. Anything older than a couple of heartbeat intervals counts as no
+        # report at all.
+        # report.at is wall-clock (time.time), `now` is monotonic. Comparing them
+        # directly yields a number in the billions and the check never fires — the
+        # first version of this did exactly that.
+        report_age = (time.time() - report.at) if report is not None and report.at else 0.0
+        if report is not None and report.at and report_age > REPORT_STALE_AFTER_S:
+            return AppState(
+                Phase.PROBLEM, "Not protecting",
+                "Surface Guard stopped checking itself",
+                Severity.PROBLEM, "Try turning protection off and on again.",
+            )
         if report is None or report.at == 0:
             if now - self.started_at < self.startup_grace_s:
                 return AppState(Phase.STARTING, "Starting up", "Connecting to the camera", Severity.WAITING)

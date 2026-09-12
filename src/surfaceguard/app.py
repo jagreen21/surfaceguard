@@ -83,6 +83,12 @@ LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / "com.surfaceguard.app.
 # stylesheets. Nothing on screen needs that except the video, which is
 # driven by frames arriving, not by this timer.
 UI_REFRESH_MS = 250
+
+# A camera with no frames for this long is offline, not starting.
+CAMERA_OFFLINE_AFTER_S = 6.0
+# How long a camera that has never produced a frame may still look like it
+# is starting. Longer than Eufy's P2P startup, shorter than a lost evening.
+FIRST_FRAME_GRACE_S = 30.0
 SLOW_REFRESH_MS = 1500
 # The invitation is not urgent, and building a deck reads a week of history.
 REVIEW_CHECK_EVERY_S = 300.0
@@ -1113,8 +1119,19 @@ class MainWindow(ReviewFlow, QWidget):
         caps = self.engine.source.capabilities
         configured = bool((self.prefs.camera or {}).get("kind"))
         self.engine.state.has_camera = configured
-        online = self.engine.running and (self.engine.metrics.last_frame_at == 0.0 or
-                                          time.monotonic() - self.engine.metrics.last_frame_at <= 6.0)
+        # A camera is online when frames are arriving — not merely when none have
+        # arrived yet. "last_frame_at == 0.0 or recent" treated a camera that had
+        # never delivered a single frame as online forever, which is precisely how
+        # the app came to report everything healthy with no picture at all. Before
+        # the first frame there is a short grace period, and then the truth.
+        now = time.monotonic()
+        last = self.engine.metrics.last_frame_at
+        if not self.engine.running:
+            online = False
+        elif last:
+            online = (now - last) <= CAMERA_OFFLINE_AFTER_S
+        else:
+            online = (now - self.engine.started_at) <= FIRST_FRAME_GRACE_S
         camera_name = caps.name if configured else ""
         state = self.engine.state.state()
         count = len(self.prefs.surfaces)

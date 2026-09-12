@@ -169,6 +169,9 @@ class Engine:
         self.motion = MotionGate()
         self._last_cats: list = []
         self._last_off_surface_log = 0.0
+        # When this engine began, so the interface can tell a camera that is
+        # still starting from one that never started.
+        self.started_at = time.monotonic()
         self._last_people: list = []
 
         self.on_frame: Callable[[FrameResult], None] | None = None
