@@ -45,6 +45,10 @@ class Roi:
     y2: int
     magnification: float = 1.0
     full_frame: bool = False
+    # The frame this crop was taken from, so a consumer working on a downscaled
+    # copy (the motion gate) can scale the region to match.
+    frame_width: int = 0
+    frame_height: int = 0
 
     @property
     def width(self) -> int:
@@ -73,7 +77,8 @@ class Roi:
 
 def full_frame(frame_size: tuple[int, int]) -> Roi:
     w, h = frame_size
-    return Roi(0, 0, int(w), int(h), magnification=1.0, full_frame=True)
+    return Roi(0, 0, int(w), int(h), magnification=1.0, full_frame=True,
+               frame_width=int(w), frame_height=int(h))
 
 
 def for_surfaces(
@@ -137,7 +142,8 @@ def for_surfaces(
     longest_full = max(width, height)
     longest_crop = max(x2 - x1, y2 - y1)
     magnification = longest_full / longest_crop if longest_crop else 1.0
-    return Roi(x1, y1, x2, y2, magnification=magnification, full_frame=False)
+    return Roi(x1, y1, x2, y2, magnification=magnification, full_frame=False,
+               frame_width=width, frame_height=height)
 
 
 def _widen(low: int, high: int, minimum: int, limit: int) -> tuple[int, int]:

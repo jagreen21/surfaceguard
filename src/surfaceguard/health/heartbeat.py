@@ -60,6 +60,10 @@ class Metrics:
     inference_ms: float = 0.0
     # How much larger the surfaces reach the detector than a full-frame pass.
     roi_magnification: float = 1.0
+    # Share of frames the motion gate skipped, and whether it has been
+    # quiet longer than a still room can explain.
+    motion_skip_rate: float = 0.0
+    detector_idle: bool = False
     registration_ms: float = 0.0
     inliers: int = 0
     registered: bool = False
@@ -117,12 +121,24 @@ def run_checks(
             detector_note or "No cat detector is installed, so nothing can be detected",
             remedy="Install a detection model — see Settings.",
         ))
+    elif metrics.detector_idle:
+        # The motion gate skipping a still room is correct and expected. Going
+        # quiet for longer than a still room can explain is not, and must never
+        # be mistaken for it: an idle detector reporting health is exactly the
+        # silent failure the design forbids.
+        checks.append(Check(
+            "detector",
+            False,
+            "The detector has not looked at a frame recently",
+            remedy="Restarting Surface Guard usually clears this.",
+        ))
     else:
         fast_enough = metrics.frames > 0 and metrics.inference_ms <= MAX_INFERENCE_MS
         checks.append(Check(
             "detector",
             fast_enough,
-            "Looking for cats" if fast_enough
+            ("Watching; the room is still" if metrics.motion_skip_rate > 0.5
+             else "Looking for cats") if fast_enough
             else f"Detection is too slow ({metrics.inference_ms:.0f} ms per frame)",
             remedy="Close other heavy apps, or lower the frame rate in Settings.",
         ))

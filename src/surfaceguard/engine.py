@@ -23,6 +23,8 @@ from .camera.scan_scheduler import Plan, ScanRunner, plan_scan
 from .camera.sources.base import CameraSource, Frame
 from .detection.cat_detector import Detector
 from .detection import roi
+from .detection.motion import MotionGate
+from .detection.motion import interval_for as motion_interval
 from .detection.gates import Verdict, evaluate, surfaces_for_pose
 from .detection.trigger_policy import Decision, Presence, TriggerPolicy
 from .geometry.projection import Box, Pose
@@ -115,6 +117,7 @@ class FrameResult:
 
     frame: Frame
     pose: Pose | None
+    inference_skipped: bool = False
     cats: list[Box] = field(default_factory=list)
     people: list[Box] = field(default_factory=list)
     verdicts: list[Verdict] = field(default_factory=list)
@@ -157,6 +160,9 @@ class Engine:
         self.updater = None
         self._frames_since_wide = 0
         self._people_wide: list = []
+        self.motion = MotionGate()
+        self._last_cats: list = []
+        self._last_people: list = []
 
         self.on_frame: Callable[[FrameResult], None] | None = None
         self.on_trigger: Callable[[Decision, FrameResult], None] | None = None
@@ -247,7 +253,10 @@ class Engine:
     # ------------------------------------------------------------- the loop
 
     def _run(self) -> None:
-        interval = 1.0 / max(1.0, self.prefs.target_fps)
+        # Slow when the room is still, faster than nominal when something moves:
+        # time-to-sound is what the deterrent depends on, and an empty kitchen
+        # does not need eight frames a second.
+        interval = motion_interval(self.motion.state, self.prefs.target_fps)
         while not self._stop.is_set():
             if self._pause_requested.is_set():
                 self._paused.set()
@@ -305,14 +314,28 @@ class Engine:
             if reg.ok and frame_pose is not None
             else roi.full_frame((frame.image.shape[1], frame.image.shape[0]))
         )
-        boxes = [
-            region.to_frame(b)
-            for b in self.detector.detect(region.crop(frame.image), (region.x1, region.y1))
-        ]
-        cats, people = Detector.split(boxes)
+        motion = self.motion.consider(reg.work, region, now)
+        if motion.skipped:
+            # Nothing changed inside the surfaces, so the previous frame's
+            # detections still describe the scene — including a cat sitting
+            # perfectly still on the counter. Carrying them forward keeps dwell
+            # and hysteresis advancing correctly; dropping them would look like
+            # the cat left, and the gate forces a real look every
+            # MAX_CONSECUTIVE_SKIPS frames so this cannot drift indefinitely.
+            cats, people = self._last_cats, self._last_people
+            result.inference_skipped = True
+        else:
+            boxes = [
+                region.to_frame(b)
+                for b in self.detector.detect(region.crop(frame.image), (region.x1, region.y1))
+            ]
+            cats, people = Detector.split(boxes)
+            self.motion.note_inference(now)
 
         self._frames_since_wide += 1
         wide_due = (
+            not motion.skipped
+            and
             not region.full_frame
             and self._frames_since_wide >= WIDE_PASS_EVERY_FRAMES
         )
@@ -331,6 +354,9 @@ class Engine:
         self.metrics.inference_ms = result.inference_ms
         self.metrics.roi_magnification = region.magnification
         result.cats, result.people = cats, people
+        self._last_cats, self._last_people = cats, people
+        self.metrics.motion_skip_rate = motion.skip_rate
+        self.metrics.detector_idle = motion.stale(now)
 
         if reg.ok and self.state.intent is Intent.ARMED:
             self._judge(result, now)

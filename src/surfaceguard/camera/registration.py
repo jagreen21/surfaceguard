@@ -46,6 +46,10 @@ class RegistrationResult:
     elapsed_ms: float
     keyframe_id: str = ""
     reason: str = ""
+    # The downscaled greyscale this registration was computed from, handed on so
+    # the motion gate can difference consecutive frames without redoing the
+    # conversion — it is the same picture, already made.
+    work: object = None
 
     @property
     def ok(self) -> bool:
@@ -94,6 +98,7 @@ class Registrar:
 
     def describe(self, image: np.ndarray) -> tuple[tuple, np.ndarray | None, float, tuple[int, int]]:
         work, scale = _to_work(image)
+        self._last_work = work
         kp, des = self._orb.detectAndCompute(work, None)
         return kp, des, scale, work.shape[:2]
 
@@ -133,7 +138,21 @@ class Registrar:
 
     # ------------------------------------------------------------- the fit
 
-    def register(
+    def register(self, image, *args, **kwargs) -> "RegistrationResult":
+        """Locate a frame, and hand on the greyscale it was located from.
+
+        Wrapping rather than editing each return path: register() has five of
+        them, and threading a field through all five is how it ends up set on
+        four.
+        """
+        self._last_work = None
+        result = self._register_inner(image, *args, **kwargs)
+        # Reuse the greyscale register() already made rather than converting the
+        # frame a second time; an early return simply has none to hand on.
+        result.work = self._last_work
+        return result
+
+    def _register_inner(
         self,
         image: np.ndarray,
         pan: float | None = None,
