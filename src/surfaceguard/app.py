@@ -79,7 +79,10 @@ from .update.updater import Updater, cleanup_previous, take_update_note
 logger = get_logger("app")
 
 LAUNCH_AGENT = Path.home() / "Library" / "LaunchAgents" / "com.surfaceguard.app.plist"
-UI_REFRESH_MS = 120
+# 120 ms meant eight state refreshes a second, each re-polishing Qt
+# stylesheets. Nothing on screen needs that except the video, which is
+# driven by frames arriving, not by this timer.
+UI_REFRESH_MS = 250
 SLOW_REFRESH_MS = 1500
 # The invitation is not urgent, and building a deck reads a week of history.
 REVIEW_CHECK_EVERY_S = 300.0
@@ -992,8 +995,14 @@ class MainWindow(ReviewFlow, QWidget):
         self._refresh_audio()
 
     def _on_frame(self, result: FrameResult) -> None:
-        self.home.live.update_result(result, self.prefs.surfaces)
-        self.camera_screen.live.update_result(result, self.prefs.surfaces)
+        # Only the view that is actually on screen. Updating both meant a full
+        # frame conversion for a widget nobody was looking at, every frame, on
+        # the GUI thread — half the per-frame UI cost spent on nothing.
+        current = self.shell.current_name()
+        if current == "Camera":
+            self.camera_screen.live.update_result(result, self.prefs.surfaces)
+        else:
+            self.home.live.update_result(result, self.prefs.surfaces)
         if self.shell.current_name == "Rooms":
             self.editor.set_live_pose(result.pose)
 

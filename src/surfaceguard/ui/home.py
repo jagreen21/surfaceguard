@@ -71,7 +71,10 @@ class LiveView(QWidget):
     def update_result(self, result: FrameResult, surfaces: list) -> None:
         self._result = result
         self._surfaces = surfaces
-        self._pixmap = Q.bgr_to_pixmap(result.frame.image)
+        # Convert at the size it will be drawn, not the camera's size. Device
+        # pixel ratio keeps it sharp on a Retina display.
+        target = int(max(320, self.width() * self.devicePixelRatioF()))
+        self._pixmap = Q.bgr_to_pixmap(result.frame.image, max_width=target)
         self.update()
 
     def set_message(self, text: str) -> None:

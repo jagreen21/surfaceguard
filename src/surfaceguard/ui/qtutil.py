@@ -171,10 +171,26 @@ def mono(size: int = 12) -> QFont:
     return f
 
 
-def bgr_to_pixmap(image: np.ndarray) -> QPixmap:
-    """OpenCV BGR ndarray -> QPixmap, with the buffer copied so Qt owns it."""
+def bgr_to_pixmap(image: np.ndarray, max_width: int = 0) -> QPixmap:
+    """OpenCV BGR ndarray -> QPixmap, with the buffer copied so Qt owns it.
+
+    ``max_width`` is the width it will actually be drawn at. Converting a 1080p
+    frame to show it in a 700 px view copies about 12 MB twice, on the GUI thread,
+    for every frame — which is what makes the whole interface pinwheel while video
+    is running. Downscaling first makes the copies an order of magnitude smaller
+    and costs nothing visible, because the result was being scaled down to this
+    size anyway.
+    """
     if image is None or image.size == 0:
         return QPixmap()
+    if max_width and image.shape[1] > max_width:
+        import cv2
+
+        scale = max_width / float(image.shape[1])
+        image = cv2.resize(
+            image, (int(max_width), max(1, int(round(image.shape[0] * scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
     rgb = np.ascontiguousarray(image[:, :, ::-1])
     h, w = rgb.shape[:2]
     qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
