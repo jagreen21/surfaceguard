@@ -787,7 +787,9 @@ def test_a_stream_that_never_delivers_a_frame_is_restarted():
     # A stream was requested and acknowledged, and no frame has ever arrived.
     camera._stream_live = True
     camera._last_frame_at = None
-    camera._requested_at = _t.monotonic() - (mod.STREAM_SILENCE_S + 1)
+    # Past the startup grace period, not merely past the stalled-stream limit:
+    # a stream that has never delivered is still starting until that expires.
+    camera._requested_at = _t.monotonic() - (mod.STREAM_STARTUP_GRACE_S + 1)
     camera._last_restart = _t.monotonic() - (mod.RESTART_COOLDOWN_S + 1)
 
     assert camera.ensure_streaming(), "a stream that never delivered was left alone"
@@ -806,3 +808,53 @@ def test_add_note_actually_reaches_activity(tmp_path, monkeypatch):
     rows = log.recent(limit=5)
     assert rows and "not standing" in rows[0].reason
     assert rows[0].fired is False
+
+
+def test_a_starting_stream_is_given_time_to_start():
+    """The regression that took the camera out entirely: silence for a stream that
+    had never delivered was measured with the same four-second limit as one that
+    had stopped. Eufy's P2P takes seconds to produce a first frame, so the watchdog
+    killed every stream before it could start and restarted it into the same race."""
+    import time as _t
+
+    from surfaceguard.bridge.client import DriverPhase, DriverState
+    from surfaceguard.camera.sources import eufy_bridge as mod
+
+    class Live:
+        connected = True
+        driver = DriverState(phase=DriverPhase.CONNECTED)
+
+        def __init__(self):
+            self.starts = 0
+
+        def add_handler(self, h): pass
+        def remove_handler(self, h): pass
+        def send(self, command, **payload): pass
+
+        def send_wait(self, command, timeout=15.0, **payload):
+            if command == "device.start_livestream":
+                self.starts += 1
+            return {}
+
+    def camera_awaiting_first_frame(age: float):
+        client = Live()
+        cam = mod.EufyBridgeCamera(client=client, serial="T8417P1", model="T8417")
+        cam._stream_live = True
+        cam._last_frame_at = None
+        cam._requested_at = _t.monotonic() - age
+        cam._last_restart = _t.monotonic() - (mod.RESTART_COOLDOWN_S + 1)
+        return cam, client
+
+    # Still starting up: leave it alone.
+    cam, client = camera_awaiting_first_frame(mod.STREAM_SILENCE_S + 2)
+    assert not cam.ensure_streaming(), "killed a stream that was still starting"
+    assert client.starts == 0
+
+    # Past the grace period with nothing: now it really is dead.
+    cam, client = camera_awaiting_first_frame(mod.STREAM_STARTUP_GRACE_S + 1)
+    assert cam.ensure_streaming(), "a stream that never started was left alone"
+    assert client.starts == 1
+
+    assert mod.STREAM_STARTUP_GRACE_S > mod.WATCHDOG_EVERY_S * 2, (
+        "the grace period must outlast several watchdog ticks"
+    )

@@ -38,6 +38,10 @@ STREAM_SILENCE_S = 4.0
 # The watchdog runs on its own thread, so recovery does not depend on the engine
 # still polling for frames.
 WATCHDOG_EVERY_S = 5.0
+# How long a freshly requested stream is given to produce its first frame before
+# it is presumed dead. Eufy's P2P routinely takes several seconds; anything near
+# STREAM_SILENCE_S restarts the stream into the same race forever.
+STREAM_STARTUP_GRACE_S = 25.0
 RESTART_COOLDOWN_S = 8.0
 
 # Seeded, then measured per model by tools/phase0.py.
@@ -401,13 +405,23 @@ class EufyBridgeCamera(CameraSource):
         now = time.monotonic()
         if now - self._last_restart < RESTART_COOLDOWN_S and not force:
             return False
-        # Measure silence from the last frame, or from when the stream was asked
-        # for if none has ever arrived. Requiring a previous frame meant a stream
-        # that started and never delivered one looked healthy forever: _stream_live
-        # was true because start_livestream succeeded, and silence could not be
-        # computed — so the camera stayed dark and the watchdog never fired.
-        since = self._last_frame_at or self._requested_at
-        silent = since is not None and (now - since) > STREAM_SILENCE_S
+        # Silence is measured from the last frame, or from when the stream was
+        # asked for if none has ever arrived — a stream that starts and never
+        # delivers must not look healthy forever.
+        #
+        # The two cases need very different patience. A stream that was working
+        # and stopped is dead within a few seconds. A stream that has just been
+        # requested has not failed yet: Eufy's P2P takes two to five seconds, and
+        # sometimes longer, to produce its first frame. Using the short limit for
+        # both meant the watchdog killed every stream at five seconds, before it
+        # could ever start, and restarted it into the same race — which is why the
+        # camera went from intermittent to permanently absent.
+        if self._last_frame_at is not None:
+            silent = (now - self._last_frame_at) > STREAM_SILENCE_S
+        elif self._requested_at is not None:
+            silent = (now - self._requested_at) > STREAM_STARTUP_GRACE_S
+        else:
+            silent = False
         if not (force or silent or not self._stream_live):
             return False
         self._last_restart = now
@@ -423,6 +437,7 @@ class EufyBridgeCamera(CameraSource):
 
         logger.info("restarting the video stream for %s", self.serial)
         try:
+            self._requested_at = now      # the grace period starts again
             self._start_livestream()
             self._stream_live = True
             self.restarts += 1
