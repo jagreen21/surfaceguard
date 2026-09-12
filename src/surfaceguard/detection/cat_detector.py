@@ -96,7 +96,7 @@ class DetectorInfo:
 
 class Detector(ABC):
     @abstractmethod
-    def detect(self, image: np.ndarray) -> list[Box]:
+    def detect(self, image: np.ndarray, origin: tuple[int, int] = (0, 0)) -> list[Box]:
         """Return cat and person boxes in full-resolution frame pixels."""
 
     @property
@@ -151,7 +151,7 @@ class OnnxDetector(Detector):
             tuple(self._session.get_providers()),
         )
 
-    def detect(self, image: np.ndarray) -> list[Box]:
+    def detect(self, image: np.ndarray, origin: tuple[int, int] = (0, 0)) -> list[Box]:
         blob, scale, pad = self._letterbox(image)
         raw = self._session.run(None, {self._input: blob})[0]
         return self._decode(raw, scale, pad, image.shape[:2])
@@ -234,10 +234,15 @@ class SyntheticDetector(Detector):
             note=f"test backend, {self.jitter_px:.0f} px jitter, {self.miss_rate:.0%} miss rate",
         )
 
-    def detect(self, image: np.ndarray) -> list[Box]:
+    def detect(self, image: np.ndarray, origin: tuple[int, int] = (0, 0)) -> list[Box]:
+        # Ground truth is in full-frame coordinates, but the contract is that
+        # boxes come back in the coordinates of the image handed in. When the
+        # engine crops to the surfaces, `origin` is where that crop was cut from.
+        ox, oy = origin
         h, w = image.shape[:2]
         out: list[Box] = []
         for label, x1, y1, x2, y2 in self._camera.ground_truth_boxes():
+            x1, y1, x2, y2 = x1 - ox, y1 - oy, x2 - ox, y2 - oy
             if self._rng.random() < self.miss_rate:
                 continue
             j = self._rng.normal(0.0, self.jitter_px, 4)

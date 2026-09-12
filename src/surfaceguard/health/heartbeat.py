@@ -58,6 +58,8 @@ class Metrics:
     last_frame_at: float = 0.0
     frames: int = 0
     inference_ms: float = 0.0
+    # How much larger the surfaces reach the detector than a full-frame pass.
+    roi_magnification: float = 1.0
     registration_ms: float = 0.0
     inliers: int = 0
     registered: bool = False

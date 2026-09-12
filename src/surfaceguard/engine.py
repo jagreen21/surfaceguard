@@ -22,6 +22,7 @@ from .camera.registration import MIN_INLIERS, Registrar
 from .camera.scan_scheduler import Plan, ScanRunner, plan_scan
 from .camera.sources.base import CameraSource, Frame
 from .detection.cat_detector import Detector
+from .detection import roi
 from .detection.gates import Verdict, evaluate, surfaces_for_pose
 from .detection.trigger_policy import Decision, Presence, TriggerPolicy
 from .geometry.projection import Box, Pose
@@ -31,6 +32,34 @@ from .storage.activity_log import ActivityLog
 from .storage.preferences import Preferences
 
 logger = get_logger("engine")
+
+# How often the whole frame is scanned for people while cats are found in a crop.
+# Four frames at 8 fps is half a second — far less than it takes someone to cross
+# a kitchen, and it keeps the expensive full-frame pass off most frames.
+WIDE_PASS_EVERY_FRAMES = 4
+
+
+def _merge_people(near: list, wide: list) -> list:
+    """People seen in the crop, plus any from the last full-frame pass.
+
+    Deduplicated by overlap so one person standing inside the crop is not counted
+    twice and does not suppress twice.
+    """
+    out = list(near)
+    for candidate in wide:
+        if not any(_overlaps(candidate, existing) for existing in out):
+            out.append(candidate)
+    return out
+
+
+def _overlaps(a, b, threshold: float = 0.3) -> bool:
+    ix1, iy1 = max(a.x1, b.x1), max(a.y1, b.y1)
+    ix2, iy2 = min(a.x2, b.x2), min(a.y2, b.y2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter <= 0:
+        return False
+    union = (a.x2 - a.x1) * (a.y2 - a.y1) + (b.x2 - b.x1) * (b.y2 - b.y1) - inter
+    return union > 0 and inter / union >= threshold
 
 
 def _bound_opencv_threads() -> None:
@@ -126,6 +155,8 @@ class Engine:
         # health reaches the same derived state everything else does (D4).
         self.bridge = None
         self.updater = None
+        self._frames_since_wide = 0
+        self._people_wide: list = []
 
         self.on_frame: Callable[[FrameResult], None] | None = None
         self.on_trigger: Callable[[Decision, FrameResult], None] | None = None
@@ -261,11 +292,45 @@ class Engine:
         self.metrics.registered = reg.ok
 
         # --- detect ------------------------------------------------------
+        # Cats are looked for in a crop around the surfaces, so the same pixels
+        # reach the network several times larger. People are looked for on the
+        # whole frame, less often: someone walking up to a counter starts outside
+        # it, and the no_person gate is what stops the sound going off mid-cook.
         t0 = time.perf_counter()
-        boxes = self.detector.detect(frame.image)
+        frame_pose = result.pose
+        region = (
+            roi.for_surfaces(
+                surfaces_for_pose(self.prefs.surfaces, frame_pose), frame_pose
+            )
+            if reg.ok and frame_pose is not None
+            else roi.full_frame((frame.image.shape[1], frame.image.shape[0]))
+        )
+        boxes = [
+            region.to_frame(b)
+            for b in self.detector.detect(region.crop(frame.image), (region.x1, region.y1))
+        ]
+        cats, people = Detector.split(boxes)
+
+        self._frames_since_wide += 1
+        wide_due = (
+            not region.full_frame
+            and self._frames_since_wide >= WIDE_PASS_EVERY_FRAMES
+        )
+        if wide_due:
+            self._frames_since_wide = 0
+            wide = self.detector.detect(frame.image)
+            _, self._people_wide = Detector.split(wide)
+        if not region.full_frame:
+            # People from the last wide pass persist between them; a person does
+            # not leave the kitchen in the time it takes to run four frames.
+            people = _merge_people(people, self._people_wide)
+        else:
+            self._people_wide = people
+
         result.inference_ms = (time.perf_counter() - t0) * 1e3
         self.metrics.inference_ms = result.inference_ms
-        result.cats, result.people = Detector.split(boxes)
+        self.metrics.roi_magnification = region.magnification
+        result.cats, result.people = cats, people
 
         if reg.ok and self.state.intent is Intent.ARMED:
             self._judge(result, now)
