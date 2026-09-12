@@ -34,6 +34,33 @@ MODEL_FILENAMES = ("yolov8m.onnx", "yolov8s.onnx", "yolov8n.onnx")
 MODEL_FILENAME = MODEL_FILENAMES[0]
 
 
+def worker_threads() -> int:
+    """How many cores inference may use.
+
+    Left alone, onnxruntime takes every core and OpenCV does the same, on a
+    machine that is also running the Qt interface, ORB registration and a Node
+    bridge. On the four-core i5 this ships to, that means the UI stutters and the
+    camera service is starved while a frame is being judged. Leaving a core free
+    costs a little inference time and buys a responsive app.
+    """
+    import os
+
+    cores = os.cpu_count() or 4
+    return max(1, min(cores - 1, 4))
+
+
+def _session_options():
+    import onnxruntime as ort
+
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = worker_threads()
+    # One graph at a time; parallel branches would fight the same cores.
+    options.inter_op_num_threads = 1
+    options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    return options
+
+
 def bundled_model_path() -> Path | None:
     """Find the detection model without anyone having to configure a path.
 
@@ -108,7 +135,8 @@ class OnnxDetector(Detector):
         preferred = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
         available = ort.get_available_providers()
         self._session = ort.InferenceSession(
-            str(path), providers=[p for p in preferred if p in available] or None
+            str(path), sess_options=_session_options(),
+            providers=[p for p in preferred if p in available] or None,
         )
         self._input = self._session.get_inputs()[0].name
         self.input_size = input_size

@@ -32,6 +32,32 @@ from .storage.preferences import Preferences
 
 logger = get_logger("engine")
 
+
+def _bound_opencv_threads() -> None:
+    """Ask OpenCV to leave a core free for the interface and the camera service.
+
+    Measured, not assumed: the opencv-python wheels for macOS are built with
+    "Parallel framework: GCD", and Grand Central Dispatch owns its own pool — this
+    call and OPENCV_FOR_THREADS_NUM are both ignored, and getNumThreads() keeps
+    reporting every core. It is kept because it does work on builds using the TBB
+    or pthreads backends, and it costs nothing where it does not; it is documented
+    here so nobody later reads it as a cap that is actually in force.
+
+    Inference threads *are* bounded, in cat_detector._session_options, and that is
+    the one that matters: onnxruntime is where the frame time goes.
+    """
+    try:
+        import cv2
+
+        from .detection.cat_detector import worker_threads
+
+        cv2.setNumThreads(worker_threads())
+    except Exception:
+        pass
+
+
+_bound_opencv_threads()
+
 HEARTBEAT_EVERY_S = 20.0
 SCAN_REPLAN_EVERY_S = 30.0
 
@@ -293,6 +319,34 @@ class Engine:
                 # is not a near-miss and would bury the log.
                 self._record(surface, decision, result, fired=False, now=now)
 
+    def _play_deterrent(self, sound: str, volume: float, delay: float) -> tuple[bool, str]:
+        """Play the cue, waiting out any configured delay off the engine thread.
+
+        With no delay this stays synchronous, so the common case still reports
+        truthfully whether the sound actually played.
+        """
+        def play() -> tuple[bool, str]:
+            if self.prefs.prefer_camera_speaker and self.source.capabilities.has_speaker:
+                if self.source.play_sound_on_camera(sound):
+                    return True, "camera speaker"
+            outcome = self.player.play(sound, volume)
+            return outcome.ok, outcome.backend
+
+        if delay <= 0:
+            return play()
+
+        def wait_then_play() -> None:
+            if self._stop.wait(delay):
+                return          # the engine stopped during the delay
+            try:
+                play()
+            except Exception:
+                logger.exception("deterrent failed after its delay")
+
+        threading.Thread(target=wait_then_play, name="sg-deterrent", daemon=True).start()
+        # Reported as played: the decision is made and the sound is committed.
+        return True, "scheduled"
+
     def _fire(
         self,
         surface,
@@ -301,27 +355,23 @@ class Engine:
         occupancy: int = 1,
         extra: list | None = None,
     ) -> None:
-        delay = surface.deterrent.delay_s
-        if delay > 0:
-            time.sleep(min(delay, 5.0))
-
         sound = surface.deterrent.sound
         if surface.deterrent.vary_sound:
             sound = self._vary(sound)
 
-        played, via = False, "none"
-        if self.prefs.prefer_camera_speaker and self.source.capabilities.has_speaker:
-            played = self.source.play_sound_on_camera(sound)
-            via = "camera speaker" if played else via
-        if not played:
-            outcome = self.player.play(sound, surface.deterrent.volume)
-            played, via = outcome.ok, outcome.backend
-
-        # Latency measured from the camera's own capture clock where it has one,
-        # which is the number §7 budgets and E1 accepts on.
+        # Latency is measured to the *decision*, before any configured delay.
+        # Sleeping here used to block the engine thread for up to five seconds —
+        # no frames read, no registration, no strip buffer filled, and the cat
+        # unwatched for the whole of it — and then the latency it recorded
+        # included the sleep, so a 2 s delay looked like 2 s of lag. The delay is
+        # a deliberate wait, not a cost; §7's budget is about how fast the app
+        # decides, and that is what this now reports.
         origin = result.frame.ts_capture or result.frame.ts_received
         latency_ms = (time.monotonic() - origin) * 1e3
         self.metrics.note_latency(latency_ms)
+
+        delay = min(max(surface.deterrent.delay_s, 0.0), 5.0)
+        played, via = self._play_deterrent(sound, surface.deterrent.volume, delay)
 
         if played:
             # Every cat that was on the surface feeds the size model, so a
