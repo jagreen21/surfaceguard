@@ -85,6 +85,7 @@ class EufyBridgeCamera(CameraSource):
         self._last_restart = 0.0
         self.restarts = 0
         self._watchdog_thread = None
+        self._last_no_data_log = 0.0
         self._decoder_codec = ""
         self._reported_codec = ""
         self._sniffed_codec = ""
@@ -169,6 +170,33 @@ class EufyBridgeCamera(CameraSource):
         )
         logger.info("bridge accepted livestream request for %s", self.serial)
 
+    def _report_no_data(self, now: float) -> None:
+        """Say plainly when the stream was accepted and nothing ever came back.
+
+        "Waiting for video" is indistinguishable from "starting up" and from
+        "never going to work", and the difference is the whole diagnosis: data
+        arriving means a decoding problem, nothing arriving means Eufy accepted
+        start_livestream and sent nothing, which is a P2P problem this app cannot
+        fix from here.
+        """
+        if self._video_chunks or self._requested_at is None:
+            return
+        waited = now - self._requested_at
+        if waited < STREAM_STARTUP_GRACE_S or now - self._last_no_data_log < 60.0:
+            return
+        self._last_no_data_log = now
+        self.last_error = (
+            f"The camera accepted the request but has sent no video for "
+            f"{waited:.0f}s."
+        )
+        logger.error(
+            "no video data at all from %s after %.0fs and %d restart(s). The "
+            "bridge accepted start_livestream, so this is the camera's P2P "
+            "connection, not decoding. Close the Eufy app on any phone; it holds "
+            "the only stream.",
+            self.serial, waited, self.restarts,
+        )
+
     def _watchdog(self) -> None:
         """Keep the video stream alive independently of anyone reading frames.
 
@@ -182,6 +210,7 @@ class EufyBridgeCamera(CameraSource):
         while not self._stop.wait(WATCHDOG_EVERY_S):
             try:
                 self.ensure_streaming()
+                self._report_no_data(time.monotonic())
             except Exception:
                 logger.exception("stream watchdog failed")
 
@@ -433,6 +462,9 @@ class EufyBridgeCamera(CameraSource):
             if not self.client.reconnect():
                 self.last_error = "Lost the connection to the camera service."
                 return False
+            # Handlers survive close(), so drop ours before adding it back, or a
+            # reconnect leaves two registered and every frame is decoded twice.
+            self.client.remove_handler(self._on_event)
             self.client.add_handler(self._on_event)
 
         logger.info("restarting the video stream for %s", self.serial)
