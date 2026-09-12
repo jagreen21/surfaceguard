@@ -42,6 +42,10 @@ WATCHDOG_EVERY_S = 5.0
 # it is presumed dead. Eufy's P2P routinely takes several seconds; anything near
 # STREAM_SILENCE_S restarts the stream into the same race forever.
 STREAM_STARTUP_GRACE_S = 25.0
+# Let the camera close the old session before asking for a new one.
+RESTART_SETTLE_S = 1.5
+# After this many restarts that changed nothing, rebuild the connection.
+RESTARTS_BEFORE_RECONNECT = 3
 RESTART_COOLDOWN_S = 8.0
 
 # Seeded, then measured per model by tools/phase0.py.
@@ -163,7 +167,27 @@ class EufyBridgeCamera(CameraSource):
     def _mark_live(self) -> None:
         self._stream_live = True
 
-    def _start_livestream(self) -> None:
+    def _start_livestream(self, restart: bool = False) -> None:
+        """Ask for video, closing any half-dead session first.
+
+        A restart must stop before it starts. When a P2P session dies without
+        saying so, the bridge still believes a livestream is running and treats
+        start_livestream as a no-op — so the watchdog fires, the request is
+        accepted, and no video ever arrives. Stopping first forces a new session,
+        and with it a fresh AES key, which the old session's key would not decrypt
+        anyway.
+        """
+        if restart:
+            try:
+                self.client.send_wait(
+                    "device.stop_livestream", serialNumber=self.serial, timeout=10.0
+                )
+                logger.info("stopped the stale livestream for %s", self.serial)
+            except BridgeError as exc:
+                # Already stopped is the common case and not a problem.
+                logger.debug("stop before restart was refused: %s", exc)
+            time.sleep(RESTART_SETTLE_S)
+
         logger.info("requesting livestream for %s (%s)", self.serial, self.model or "unknown model")
         self.client.send_wait(
             "device.start_livestream", serialNumber=self.serial, timeout=30.0
@@ -467,10 +491,20 @@ class EufyBridgeCamera(CameraSource):
             self.client.remove_handler(self._on_event)
             self.client.add_handler(self._on_event)
 
+        # Restarting the stream repeatedly without success means the session
+        # itself is wedged; rebuild the whole connection rather than asking a dead
+        # one the same question forever.
+        if self.restarts and self.restarts % RESTARTS_BEFORE_RECONNECT == 0:
+            logger.info("%d restarts have not helped; rebuilding the connection",
+                        self.restarts)
+            if self.client.reconnect():
+                self.client.remove_handler(self._on_event)
+                self.client.add_handler(self._on_event)
+
         logger.info("restarting the video stream for %s", self.serial)
         try:
             self._requested_at = now      # the grace period starts again
-            self._start_livestream()
+            self._start_livestream(restart=True)
             self._stream_live = True
             self.restarts += 1
             return True

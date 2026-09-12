@@ -56,7 +56,12 @@ class Preferences:
     # P2P workarounds for cameras whose key exchange fails with the
     # defaults. Changing either needs the camera reconnected.
     p2p_local_only: bool = False
-    p2p_embedded_pkcs1: bool = True
+    # False, because that is what works on the E30. node-rsa's bundled PKCS#1
+    # implementation fails to decrypt the AES key the camera wraps for us
+    # ("Error during decryption (probably incorrect key)" in NodeRSA.$$decryptKey),
+    # and the stream is discarded after the parameter sets. Node's native path
+    # decrypts it. eufy-security-ws forces this true; it has to be overridden.
+    p2p_embedded_pkcs1: bool = False
     room_name: str = "Kitchen"
     detection_sensitivity: str = "Balanced"
     custom_sounds: dict[str, str] = field(default_factory=dict)

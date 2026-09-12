@@ -858,3 +858,72 @@ def test_a_starting_stream_is_given_time_to_start():
     assert mod.STREAM_STARTUP_GRACE_S > mod.WATCHDOG_EVERY_S * 2, (
         "the grace period must outlast several watchdog ticks"
     )
+
+
+def test_a_restart_stops_the_stale_stream_first():
+    """When a P2P session dies without saying so, the bridge still believes a
+    livestream is running and treats start_livestream as a no-op. The watchdog
+    then fires forever, each request accepted, no video ever arriving."""
+    import time as _t
+
+    from surfaceguard.bridge.client import DriverPhase, DriverState
+    from surfaceguard.camera.sources import eufy_bridge as mod
+
+    class Live:
+        connected = True
+        driver = DriverState(phase=DriverPhase.CONNECTED)
+
+        def __init__(self):
+            self.commands = []
+
+        def add_handler(self, h): pass
+        def remove_handler(self, h): pass
+        def send(self, command, **payload): pass
+
+        def send_wait(self, command, timeout=15.0, **payload):
+            self.commands.append(command)
+            return {}
+
+    client = Live()
+    camera = mod.EufyBridgeCamera(client=client, serial="T8417P1", model="T8417")
+    camera._stream_live = True
+    camera._last_frame_at = _t.monotonic() - (mod.STREAM_SILENCE_S + 1)
+    camera._last_restart = _t.monotonic() - (mod.RESTART_COOLDOWN_S + 1)
+
+    assert camera.ensure_streaming()
+    assert client.commands == ["device.stop_livestream", "device.start_livestream"], (
+        f"expected a stop before the start, got {client.commands}"
+    )
+
+
+def test_repeated_failed_restarts_rebuild_the_connection():
+    """Asking a wedged session the same question forever is not recovery."""
+    import time as _t
+
+    from surfaceguard.bridge.client import DriverPhase, DriverState
+    from surfaceguard.camera.sources import eufy_bridge as mod
+
+    class Live:
+        connected = True
+        driver = DriverState(phase=DriverPhase.CONNECTED)
+
+        def __init__(self):
+            self.reconnects = 0
+
+        def add_handler(self, h): pass
+        def remove_handler(self, h): pass
+        def send(self, command, **payload): pass
+        def send_wait(self, command, timeout=15.0, **payload): return {}
+
+        def reconnect(self, timeout: float = 12.0) -> bool:
+            self.reconnects += 1
+            return True
+
+    client = Live()
+    camera = mod.EufyBridgeCamera(client=client, serial="T8417P1", model="T8417")
+    camera._stream_live = True
+    for _ in range(mod.RESTARTS_BEFORE_RECONNECT + 1):
+        camera._last_frame_at = _t.monotonic() - (mod.STREAM_SILENCE_S + 1)
+        camera._last_restart = _t.monotonic() - (mod.RESTART_COOLDOWN_S + 1)
+        camera.ensure_streaming()
+    assert client.reconnects >= 1, "restarting alone never escalated"
