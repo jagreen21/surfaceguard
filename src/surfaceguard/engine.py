@@ -516,6 +516,13 @@ class Engine:
         if now - self._last_off_surface_log >= OFF_SURFACE_LOG_EVERY_S:
             self._last_off_surface_log = now
             logger.info("cat %s (%d times so far)", why, self.metrics.cats_off_surface)
+            # And put it in Activity. An empty tab while a cat is plainly being
+            # seen tells her nothing; one entry every thirty seconds explains it
+            # without burying the events that matter.
+            try:
+                self.log.add_note(f"Saw a cat — {why}")
+            except Exception:
+                logger.debug("could not record the note", exc_info=True)
 
     def _record(
         self,

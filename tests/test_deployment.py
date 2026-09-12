@@ -749,3 +749,46 @@ def test_a_stream_restart_is_rate_limited():
     first = client.starts
     camera.ensure_streaming()          # immediately after: inside the cooldown
     assert client.starts == first, "restarts must be rate limited"
+
+
+def test_a_stream_that_never_delivers_a_frame_is_restarted():
+    """The reported failure: camera offline, push notifications still arriving,
+    never recovering. start_livestream succeeded so the stream looked live, and
+    silence was measured from the last frame — of which there had been none — so
+    the watchdog concluded all was well, forever."""
+    import time as _t
+
+    from surfaceguard.bridge.client import DriverPhase, DriverState
+    from surfaceguard.camera.sources import eufy_bridge as mod
+
+    class Live:
+        connected = True
+        driver = DriverState(phase=DriverPhase.CONNECTED)
+
+        def __init__(self):
+            self.starts = 0
+
+        def add_handler(self, h):
+            pass
+
+        def remove_handler(self, h):
+            pass
+
+        def send_wait(self, command, timeout=15.0, **payload):
+            if command == "device.start_livestream":
+                self.starts += 1
+            return {}
+
+        def send(self, command, **payload):
+            pass
+
+    client = Live()
+    camera = mod.EufyBridgeCamera(client=client, serial="T8417P1", model="T8417")
+    # A stream was requested and acknowledged, and no frame has ever arrived.
+    camera._stream_live = True
+    camera._last_frame_at = None
+    camera._requested_at = _t.monotonic() - (mod.STREAM_SILENCE_S + 1)
+    camera._last_restart = _t.monotonic() - (mod.RESTART_COOLDOWN_S + 1)
+
+    assert camera.ensure_streaming(), "a stream that never delivered was left alone"
+    assert client.starts == 1

@@ -35,6 +35,9 @@ DIR_ROTATE_RIGHT, DIR_ROTATE_LEFT, DIR_ROTATE_UP, DIR_ROTATE_DOWN = 0, 1, 2, 3
 # heartbeat's six-second frame-age limit, so a restart is attempted before the app
 # tells her protection has stopped.
 STREAM_SILENCE_S = 4.0
+# The watchdog runs on its own thread, so recovery does not depend on the engine
+# still polling for frames.
+WATCHDOG_EVERY_S = 5.0
 RESTART_COOLDOWN_S = 8.0
 
 # Seeded, then measured per model by tools/phase0.py.
@@ -77,6 +80,7 @@ class EufyBridgeCamera(CameraSource):
         self._last_frame_at: float | None = None
         self._last_restart = 0.0
         self.restarts = 0
+        self._watchdog_thread = None
         self._decoder_codec = ""
         self._reported_codec = ""
         self._sniffed_codec = ""
@@ -124,6 +128,11 @@ class EufyBridgeCamera(CameraSource):
 
         self.client.add_handler(self._on_event)
         self._requested_at = time.monotonic()
+        if self._watchdog_thread is None or not self._watchdog_thread.is_alive():
+            self._watchdog_thread = threading.Thread(
+                target=self._watchdog, name="sg-stream-watchdog", daemon=True
+            )
+            self._watchdog_thread.start()
         try:
             self._start_livestream()
             self._stream_live = True
@@ -155,6 +164,22 @@ class EufyBridgeCamera(CameraSource):
             "device.start_livestream", serialNumber=self.serial, timeout=30.0
         )
         logger.info("bridge accepted livestream request for %s", self.serial)
+
+    def _watchdog(self) -> None:
+        """Keep the video stream alive independently of anyone reading frames.
+
+        Recovery used to happen only inside read(), which the engine calls while
+        it is judging. So a stream that died while protection was off, or paused,
+        or after the loop stalled, was never revived — the watchdog depended on
+        the very thing it existed to rescue. Her camera stayed offline while push
+        notifications kept arriving, which proved the bridge was fine and only the
+        video was gone.
+        """
+        while not self._stop.wait(WATCHDOG_EVERY_S):
+            try:
+                self.ensure_streaming()
+            except Exception:
+                logger.exception("stream watchdog failed")
 
     def stop(self) -> None:
         self._stop.set()
@@ -243,6 +268,9 @@ class EufyBridgeCamera(CameraSource):
             property_name = str(event.get("name") or "")
             self._properties[property_name] = event.get("value")
             if property_name in PET_PROPERTIES and event.get("value"):
+                # The bridge is plainly working if this arrived, so if video is
+                # not, now is exactly the moment to notice.
+                self.ensure_streaming()
                 self._publish_pet_event(
                     PetEvent(time.monotonic(), device=self.serial, raw=event)
                 )
@@ -373,8 +401,13 @@ class EufyBridgeCamera(CameraSource):
         now = time.monotonic()
         if now - self._last_restart < RESTART_COOLDOWN_S and not force:
             return False
-        silent = (self._last_frame_at is not None
-                  and now - self._last_frame_at > STREAM_SILENCE_S)
+        # Measure silence from the last frame, or from when the stream was asked
+        # for if none has ever arrived. Requiring a previous frame meant a stream
+        # that started and never delivered one looked healthy forever: _stream_live
+        # was true because start_livestream succeeded, and silence could not be
+        # computed — so the camera stayed dark and the watchdog never fired.
+        since = self._last_frame_at or self._requested_at
+        silent = since is not None and (now - since) > STREAM_SILENCE_S
         if not (force or silent or not self._stream_live):
             return False
         self._last_restart = now
