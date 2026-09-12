@@ -110,6 +110,10 @@ REVIEWABLE_GATES = frozenset({"scale", "known_false_alarm", "confidence", "no_pe
 # default 8 fps this reaches about two seconds back, which is enough motion to
 # settle most of the calls the review picks precisely because they are hard.
 STRIP_BUFFER = 16
+
+# How often to mention a cat that produced no decision: often enough to be
+# found in the log, rarely enough not to bury it.
+OFF_SURFACE_LOG_EVERY_S = 30.0
 STRIP_FRAMES = 5
 
 
@@ -164,6 +168,7 @@ class Engine:
         self._people_wide: list = []
         self.motion = MotionGate()
         self._last_cats: list = []
+        self._last_off_surface_log = 0.0
         self._last_people: list = []
 
         self.on_frame: Callable[[FrameResult], None] | None = None
@@ -362,6 +367,13 @@ class Engine:
 
         if reg.ok and self.state.intent is Intent.ARMED:
             self._judge(result, now)
+        elif result.cats and self.state.intent is Intent.ARMED:
+            # Detection worked and judging never happened, because the frame could
+            # not be placed in the room map. Nothing downstream runs, so without
+            # this the app is completely silent about a cat it can plainly see.
+            self._note_unjudged(
+                now, f"seen, but the camera view could not be located ({reg.reason})"
+            )
         elif reg.ok:
             # Not armed: keep presence state from going stale so arming mid-visit
             # does not immediately fire on a cat that was already there.
@@ -411,6 +423,13 @@ class Engine:
                 # Near-misses are worth logging, but "the cat was somewhere else"
                 # is not a near-miss and would bury the log.
                 self._record(surface, decision, result, fired=False, now=now)
+            elif result.cats and best is not None:
+                # A cat in view, judged, and not on this surface. Not an event, but
+                # not silent either: a cat correctly identified with nothing at all
+                # appearing in Activity is what a polygon in the wrong place looks
+                # like, and the paw point is the bottom-centre of the box, so a cat
+                # whose body covers the surface can still be standing outside it.
+                self._note_unjudged(now, "seen, but not standing on a surface")
 
     def _play_deterrent(self, sound: str, volume: float, delay: float) -> tuple[bool, str]:
         """Play the cue, waiting out any configured delay off the engine thread.
@@ -488,6 +507,15 @@ class Engine:
         if not options:
             return preferred
         return preferred if np.random.random() < 0.5 else str(np.random.choice(options))
+
+    def _note_unjudged(self, now: float, why: str) -> None:
+        """A cat was detected and no decision came of it. Never let that be silent."""
+        self.metrics.cats_off_surface += 1
+        self.metrics.last_cat_off_surface_at = now
+        self.metrics.last_unjudged_reason = why
+        if now - self._last_off_surface_log >= OFF_SURFACE_LOG_EVERY_S:
+            self._last_off_surface_log = now
+            logger.info("cat %s (%d times so far)", why, self.metrics.cats_off_surface)
 
     def _record(
         self,

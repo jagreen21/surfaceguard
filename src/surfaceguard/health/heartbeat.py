@@ -64,6 +64,12 @@ class Metrics:
     # quiet longer than a still room can explain.
     motion_skip_rate: float = 0.0
     detector_idle: bool = False
+    # Cats seen in view but not standing on any protected surface. A
+    # steady count here with nothing in Activity means the polygon is
+    # probably in the wrong place.
+    cats_off_surface: int = 0
+    last_cat_off_surface_at: float = 0.0
+    last_unjudged_reason: str = ""
     registration_ms: float = 0.0
     inliers: int = 0
     registered: bool = False

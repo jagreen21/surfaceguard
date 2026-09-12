@@ -211,6 +211,9 @@ class DiagnosticsScreen(QWidget):
             f"registered : {m.registered}  inliers {m.inliers}  "
             f"registration {m.registration_ms:.1f} ms",
             f"latency p95: {m.p95_latency_ms() or float('nan'):.0f} ms",
+            f"cats seen off every surface: {m.cats_off_surface}"
+            + ("   <- if this climbs while nothing fires, the surface is probably "
+               "drawn in the wrong place" if m.cats_off_surface else ""),
             f"surfaces   : {len(self.engine.prefs.surfaces)}  "
             f"missed pet events: {self.engine.missed_pet_events}",
         ]
