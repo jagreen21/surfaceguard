@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
 
 from ..bridge.client import BridgeClient, BridgeError, DriverPhase, looks_like_camera
 from ..bridge.credentials import EufyAccount
-from ..bridge.supervisor import BridgeSupervisor
+from ..bridge.supervisor import P2P_ONLY_LOCAL, P2P_QUICKEST, BridgeSupervisor
 from ..camera.panorama import RoomMap, StitchError, build_room_map
 from ..camera.sources.base import CameraSource, SourceError
 from ..logging_setup import redact_support_text, tail
@@ -597,7 +597,12 @@ class OnboardingDialog(QDialog):
         if self.client is not None:
             self.client.close()
             self.client = None
-        self.supervisor = BridgeSupervisor(self.account)
+        from ..storage.preferences import Preferences
+        _p = Preferences.load()
+        self.supervisor = BridgeSupervisor(
+            self.account, embedded_pkcs1=_p.p2p_embedded_pkcs1,
+            p2p_setup=(P2P_ONLY_LOCAL if _p.p2p_local_only else P2P_QUICKEST),
+        )
         self._say("Starting the camera service and signing in…")
         self._run_signin(None)
 

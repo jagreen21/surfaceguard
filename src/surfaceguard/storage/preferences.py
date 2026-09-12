@@ -53,6 +53,10 @@ class Preferences:
     master_volume: float = 0.6
     scan_weights: dict[str, float] = field(default_factory=dict)
     camera: dict = field(default_factory=dict)
+    # P2P workarounds for cameras whose key exchange fails with the
+    # defaults. Changing either needs the camera reconnected.
+    p2p_local_only: bool = False
+    p2p_embedded_pkcs1: bool = True
     room_name: str = "Kitchen"
     detection_sensitivity: str = "Balanced"
     custom_sounds: dict[str, str] = field(default_factory=dict)

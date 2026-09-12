@@ -47,6 +47,10 @@ START_TIMEOUT_S = 45.0
 BACKOFF_S = (2.0, 5.0, 15.0, 30.0, 60.0)
 LOG_LINES = 400
 
+# eufy-security-client's P2PConnectionType.
+P2P_ONLY_LOCAL = 1
+P2P_QUICKEST = 2
+
 
 def runtime_root() -> Path:
     """Where the bundled Node and bridge live, in development or inside the .app."""
@@ -113,8 +117,16 @@ class BridgeStatus:
 class BridgeSupervisor:
     """Starts the bridge, keeps it alive, and says why when it will not start."""
 
-    def __init__(self, account: EufyAccount, port: int | None = None) -> None:
+    def __init__(
+        self,
+        account: EufyAccount,
+        port: int | None = None,
+        embedded_pkcs1: bool = True,
+        p2p_setup: int = P2P_QUICKEST,
+    ) -> None:
         self.account = account
+        self.embedded_pkcs1 = embedded_pkcs1
+        self.p2p_setup = p2p_setup
         self.port = port or free_port()
         self.status = BridgeStatus(port=self.port)
         self._proc: subprocess.Popen | None = None
@@ -301,6 +313,21 @@ class BridgeSupervisor:
                 "persistentDir": str(self.work_dir),
                 "eventDurationSeconds": 10,
                 "acceptInvitations": False,
+                # P2P knobs, exposed because the E30's key exchange fails with the
+                # defaults: the camera sends its parameter sets and then
+                # "Error during decryption (probably incorrect key)" in
+                # NodeRSA.$$decryptKey, and the stream dies after one chunk.
+                #
+                # enableEmbeddedPKCS1Support picks between node-rsa's bundled
+                # PKCS1 implementation and Node's native one — Node 18+ removed
+                # PKCS1 padding, which is why the workaround exists and why it is
+                # the first thing to try flipping.
+                #
+                # p2pConnectionSetup: 1 = ONLY_LOCAL, 2 = QUICKEST. Forcing local
+                # avoids Eufy's relay, which is a common cause of a session that
+                # negotiates and then cannot be decrypted.
+                "enableEmbeddedPKCS1Support": self.embedded_pkcs1,
+                "p2pConnectionSetup": self.p2p_setup,
             }, fh)
         return path
 

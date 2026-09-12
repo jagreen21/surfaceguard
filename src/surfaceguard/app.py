@@ -40,7 +40,7 @@ if __package__ in (None, ""):  # allow `python src/surfaceguard/app.py`
 from .audio.player import Player
 from .bridge.credentials import EufyAccount
 from .logging_setup import get as get_logger, log_dir, setup as setup_logging
-from .bridge.supervisor import BridgeSupervisor
+from .bridge.supervisor import P2P_ONLY_LOCAL, P2P_QUICKEST, BridgeSupervisor
 from .camera.sources.base import CameraSource, SourceError
 from .detection.cat_detector import Detector, SyntheticDetector, load_detector
 from .engine import Engine, FrameResult
@@ -1279,7 +1279,9 @@ def _make_source(prefs: Preferences) -> tuple[CameraSource | None, BridgeSupervi
         account = EufyAccount(
             username=str(cfg.get("username", "")), country=str(cfg.get("country", "US"))
         )
-        supervisor = BridgeSupervisor(account)
+        supervisor = BridgeSupervisor(account, embedded_pkcs1=prefs.p2p_embedded_pkcs1,
+                                  p2p_setup=(P2P_ONLY_LOCAL if prefs.p2p_local_only
+                                             else P2P_QUICKEST))
         status = supervisor.start(wait=True)
         if not status.listening:
             logger.error("camera service did not start: %s", status.fatal or status.message)
