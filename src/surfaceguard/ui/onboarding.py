@@ -18,10 +18,11 @@ the camera is pointing — is the one thing the flow dwells on.
 from __future__ import annotations
 
 import base64
+import time
 from dataclasses import dataclass
 from enum import IntEnum
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -50,6 +51,9 @@ from .home import LiveView
 # Eufy accounts are region-locked, and the wrong region is a common silent failure.
 # Friendly names for the models this is likely to meet, so the picker does not
 # just show three part numbers.
+# How long to wait for a first frame before suggesting the camera is busy.
+PREVIEW_PATIENCE_S = 12.0
+
 MODEL_NAMES = {
     "T8417": "Indoor Cam E30",
     "T8416": "Indoor Cam E220",
@@ -203,6 +207,9 @@ class OnboardingDialog(QDialog):
         self._thread: QThread | None = None
         self._worker: QObject | None = None
         self._challenged = False
+        self._preview_timer: QTimer | None = None
+        self._preview_frames = 0
+        self._preview_started = 0.0
 
         self.stack = QStackedWidget()
         for build in (self._page_kind, self._page_credentials, self._page_challenge,
@@ -419,6 +426,8 @@ class OnboardingDialog(QDialog):
         return steps
 
     def _go(self, page: Page) -> None:
+        if page is not Page.CONFIRM:
+            self._stop_preview()
         self.stack.setCurrentIndex(int(page))
         self._sync_nav()
 
@@ -452,6 +461,10 @@ class OnboardingDialog(QDialog):
             Page.SOUND: "Continue", Page.DONE: "Draw a surface",
         }
         self.next_btn.setText(labels[page])
+        if page is Page.CONFIRM:
+            # PTZ control and video use separate paths. A working camera motor is
+            # not proof that a picture is available for the room scan.
+            self.next_btn.setEnabled(self._preview_frames > 0)
         first = steps[0] if steps else page
         self.back_btn.setEnabled(page != first and page != Page.SCAN)
 
@@ -508,6 +521,13 @@ class OnboardingDialog(QDialog):
         elif page is Page.PICKER:
             self._choose_device()
         elif page is Page.CONFIRM:
+            if self._preview_frames == 0:
+                self._say(
+                    "Wait until the camera picture appears before continuing. If it "
+                    "doesn't, go Back and try the camera again.",
+                    bad=True,
+                )
+                return
             self._go(Page.SCAN)
         elif page is Page.SCAN:
             self._start_scan()
@@ -589,6 +609,12 @@ class OnboardingDialog(QDialog):
         worker.settled.connect(self._on_signin_settled)
         worker.failed.connect(self._on_signin_failed)
         worker.devices_found.connect(self._on_devices_found)
+        # The worker emits exactly one terminal signal. Stop its event loop at
+        # the source as well as in the UI callback, so closing setup during that
+        # queued handoff cannot destroy a still-running QThread.
+        worker.settled.connect(self._thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.failed.connect(self._thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.devices_found.connect(self._thread.quit, Qt.ConnectionType.DirectConnection)
         self._thread.start()
 
     def _end_thread(self) -> None:
@@ -740,20 +766,64 @@ class OnboardingDialog(QDialog):
             self.source = None
             self._say(str(exc), bad=True)
             return
-        self._say("")
+        self._say("Starting the picture…")
         self._go(Page.CONFIRM)
         self._pump_preview()
 
     # ------------------------------------------------------------------ scan
 
     def _pump_preview(self) -> None:
+        """Start pulling frames continuously while the preview is on screen.
+
+        This used to read a single frame, once. A P2P stream takes two to five
+        seconds to produce its first picture, so the one read usually timed out and
+        the page stayed black — with nothing to say why, on the one screen whose
+        entire job is "does this look right?".
+        """
+        if self._preview_timer is None:
+            self._preview_timer = QTimer(self)
+            self._preview_timer.setInterval(120)
+            self._preview_timer.timeout.connect(self._preview_tick)
+        self._preview_frames = 0
+        self._preview_started = time.monotonic()
+        self.next_btn.setEnabled(False)
+        self._preview_timer.start()
+        self._preview_tick()
+
+    def _preview_tick(self) -> None:
         from ..engine import FrameResult
 
-        if self.source is None:
+        if self.source is None or self.page is not Page.CONFIRM:
+            self._stop_preview()
             return
-        frame = self.source.read(timeout=6.0)
+        frame = self.source.read(timeout=0.05)
         if frame is not None:
+            self._preview_frames += 1
             self.preview.update_result(FrameResult(frame=frame, pose=None), [])
+            if self._preview_frames == 1:
+                self._say("")
+                self.next_btn.setEnabled(True)
+            return
+        waited = time.monotonic() - self._preview_started
+        if self._preview_frames == 0:
+            stream_error = str(getattr(self.source, "last_error", "") or "").strip()
+            if stream_error:
+                self._say(stream_error + " Go Back and try this camera again.", bad=True)
+                self.next_btn.setEnabled(False)
+                return
+            if waited < PREVIEW_PATIENCE_S:
+                self._say(f"Waiting for the picture… ({waited:.0f}s)")
+            else:
+                self._say(
+                    "No video arrived, so Surface Guard will not move the camera. "
+                    "Close the Eufy app on any phone, then go Back and try this "
+                    "camera again.",
+                    bad=True,
+                )
+
+    def _stop_preview(self) -> None:
+        if self._preview_timer is not None:
+            self._preview_timer.stop()
 
     def _start_scan(self) -> None:
         if self.source is None:
@@ -769,6 +839,7 @@ class OnboardingDialog(QDialog):
         self._thread.started.connect(worker.run)
         worker.progress.connect(self._on_scan_progress)
         worker.finished.connect(self._on_scan_finished)
+        worker.finished.connect(self._thread.quit, Qt.ConnectionType.DirectConnection)
         self._thread.start()
 
     def _on_scan_progress(self, done: int, total: int) -> None:

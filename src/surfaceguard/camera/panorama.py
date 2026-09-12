@@ -119,12 +119,21 @@ def build_room_map(
 
     reg = registrar or Registrar()
     shots: list[tuple[float | None, float | None, np.ndarray]] = []
+    # Verify video before issuing even one PTZ command. Camera control and video
+    # are separate paths on Eufy hardware; without this, a broken stream made the
+    # E30 rotate to the first sweep extreme and stop there.
+    if source.read(timeout=5.0) is None:
+        raise StitchError(
+            "no camera picture arrived, so the room scan did not move the camera"
+        )
     for i, pan in enumerate(pan_positions):
         if caps.has_ptz:
             source.move_to(pan, tilt, settle_s=settle_s)
         frame = source.read(timeout=5.0)
         if frame is None:
-            raise StitchError("the camera stopped sending video during the sweep")
+            raise StitchError(
+                f"the camera stopped sending video after {i} of {len(pan_positions)} positions"
+            )
         shots.append((frame.pan if frame.pan is not None else pan, frame.tilt, frame.image))
         if progress:
             progress(i + 1, len(pan_positions))

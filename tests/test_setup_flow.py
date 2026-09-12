@@ -422,6 +422,20 @@ def test_the_preview_says_which_camera_it_is(qt_app, no_keychain):
     assert "Back" in dialog.subtitle.text()
 
 
+def test_a_black_preview_cannot_start_a_camera_sweep(qt_app, no_keychain):
+    """PTZ can work while video is broken; that must not move the camera."""
+    dialog = OnboardingDialog(allow_demo=True)
+    dialog.source = _FakeCamera()
+    dialog.chosen = {"name": "Kitchen", "serialNumber": "T8417P1"}
+    dialog._go(Page.CONFIRM)
+    dialog._pump_preview()
+
+    assert not dialog.next_btn.isEnabled()
+    dialog._advance()
+    assert dialog.page is Page.CONFIRM
+    assert "picture" in dialog.status.text().lower()
+
+
 def test_the_picker_shows_friendly_model_names(qt_app, no_keychain):
     dialog = OnboardingDialog(allow_demo=True)
     dialog._show_devices([

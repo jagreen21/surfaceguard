@@ -1,7 +1,7 @@
 """Eufy camera video, over the supervised bridge.
 
 The protocol lives in :mod:`surfaceguard.bridge.client`; this file is only the
-:class:`CameraSource` on top of it. H.264 is decoded in-process with PyAV rather
+:class:`CameraSource` on top of it. H.264/H.265 is decoded in-process with PyAV rather
 than by piping to an ffmpeg binary — one less thing to ship, and one less process
 between the camera and the latency budget.
 
@@ -24,11 +24,17 @@ import time
 import numpy as np
 
 from ...bridge.client import BridgeClient, BridgeError, DriverPhase, is_pan_tilt
+from ...logging_setup import get as get_logger
 from .base import Capabilities, CameraSource, Frame, PetEvent, SourceError
+
+logger = get_logger("camera.eufy")
 
 DIR_ROTATE_RIGHT, DIR_ROTATE_LEFT, DIR_ROTATE_UP, DIR_ROTATE_DOWN = 0, 1, 2, 3
 
 # Seeded, then measured per model by tools/phase0.py.
+# A camera needs a moment to release a stream before it will start another.
+RELEASE_SETTLE_S = 2.5
+
 DEGREES_PER_NUDGE = 5.0
 NUDGE_INTERVAL_S = 0.25
 
@@ -61,6 +67,8 @@ class EufyBridgeCamera(CameraSource):
         self._first_video_at: float | None = None
         self._requested_at: float | None = None
         self._decode_errors = 0
+        self._decoder_codec = ""
+        self._first_chunk_logged = False
         self.last_error = ""
 
     # ---------------------------------------------------------------- lifecycle
@@ -73,7 +81,19 @@ class EufyBridgeCamera(CameraSource):
                 "Not signed in to Eufy yet. Open Settings and sign in to the camera account."
             )
         self._stop.clear()
-        self._open_decoder()
+        self._first_video_at = None
+        self._decode_errors = 0
+        self._decoder_codec = ""
+        self._first_chunk_logged = False
+        self.last_error = ""
+        while not self._frames.empty():
+            try:
+                self._frames.get_nowait()
+            except queue.Empty:
+                break
+        # Prove the bundled PyAV install can create a decoder now. The bridge
+        # reports the actual codec with its first chunk; H.265 then replaces it.
+        self._open_decoder("h264")
         try:
             self._properties = self.client.device_properties(self.serial)
         except BridgeError as exc:
@@ -83,18 +103,49 @@ class EufyBridgeCamera(CameraSource):
         self.client.add_handler(self._on_event)
         self._requested_at = time.monotonic()
         try:
-            self.client.send_wait("device.start_livestream", serialNumber=self.serial, timeout=25.0)
+            self._start_livestream()
         except BridgeError as exc:
-            raise SourceError(
-                f"The camera would not start streaming. {exc} "
-                "It may be busy in the Eufy app — close that and try again."
-            ) from exc
+            # One retry after telling the camera to stop: the usual reason a start
+            # is refused is a stream this app itself left open a moment ago.
+            try:
+                self.client.send_wait(
+                    "device.stop_livestream", serialNumber=self.serial, timeout=6.0
+                )
+            except BridgeError:
+                pass
+            time.sleep(RELEASE_SETTLE_S)
+            try:
+                self._start_livestream()
+            except BridgeError:
+                raise SourceError(
+                    "This camera would not start streaming. It is usually because it "
+                    "is open in the Eufy app on a phone — close it there and try "
+                    f"again. ({exc})"
+                ) from exc
+
+    def _start_livestream(self) -> None:
+        logger.info("requesting livestream for %s (%s)", self.serial, self.model or "unknown model")
+        self.client.send_wait(
+            "device.start_livestream", serialNumber=self.serial, timeout=30.0
+        )
+        logger.info("bridge accepted livestream request for %s", self.serial)
 
     def stop(self) -> None:
         self._stop.set()
         try:
             if self.client.connected:
-                self.client.send("device.stop_livestream", serialNumber=self.serial)
+                # Wait for the bridge to confirm, and give the camera a moment to
+                # actually let go. Fire-and-forget left the stream open on the
+                # camera's side, so choosing a different camera and coming back was
+                # met with "it may be busy in the Eufy app" — when the thing holding
+                # it was this app.
+                try:
+                    self.client.send_wait(
+                        "device.stop_livestream", serialNumber=self.serial, timeout=6.0
+                    )
+                except BridgeError:
+                    self.client.send("device.stop_livestream", serialNumber=self.serial)
+                time.sleep(RELEASE_SETTLE_S)
         except Exception:
             pass
         self._decoder = None
@@ -104,12 +155,13 @@ class EufyBridgeCamera(CameraSource):
         if self.owns_client:
             self.client.close()
 
-    def _open_decoder(self) -> None:
+    def _open_decoder(self, codec: str) -> None:
         try:
             import av  # noqa: PLC0415 — optional at import time, required to stream
 
             av.logging.set_level(av.logging.PANIC)
-            self._decoder = av.CodecContext.create("h264", "r")
+            self._decoder = av.CodecContext.create(codec, "r")
+            self._decoder_codec = codec
         except Exception as exc:
             raise SourceError(
                 "The video decoder is missing from this install. Reinstall Surface Guard. "
@@ -157,7 +209,9 @@ class EufyBridgeCamera(CameraSource):
             return
         name = event.get("event")
         if name == "livestream video data":
-            self._feed(event.get("buffer"))
+            self._feed(event.get("buffer"), event.get("metadata"))
+        elif name == "livestream started":
+            logger.info("livestream started for %s", self.serial)
         elif name == "property changed" and event.get("name") in PET_PROPERTIES:
             if event.get("value"):
                 self._publish_pet_event(
@@ -165,19 +219,44 @@ class EufyBridgeCamera(CameraSource):
                 )
         elif name == "livestream stopped":
             self.last_error = "The camera stopped the video stream."
+            logger.warning("livestream stopped for %s", self.serial)
 
-    def _feed(self, buffer: object) -> None:
+    def _feed(self, buffer: object, metadata: object = None) -> None:
         chunk = _decode_buffer(buffer)
-        if not chunk or self._decoder is None or self._stop.is_set():
+        if not chunk or self._stop.is_set():
             return
+        details = metadata if isinstance(metadata, dict) else {}
+        codec = _decoder_name(details.get("videoCodec"))
+        if codec != self._decoder_codec:
+            logger.info("video codec changed for %s: %s (%s)", self.serial, codec, details)
+            try:
+                self._open_decoder(codec)
+            except SourceError as exc:
+                self.last_error = str(exc)
+                logger.error("could not open %s decoder for %s: %s", codec, self.serial, exc)
+                return
+        if self._decoder is None:
+            return
+        if not self._first_chunk_logged:
+            self._first_chunk_logged = True
+            logger.info(
+                "first video chunk for %s: %d bytes codec=%s size=%sx%s fps=%s",
+                self.serial, len(chunk), codec, details.get("videoWidth", "?"),
+                details.get("videoHeight", "?"), details.get("videoFPS", "?"),
+            )
         try:
             for packet in self._decoder.parse(chunk):
                 for frame in self._decoder.decode(packet):
                     self._emit(frame)
-        except Exception:
+        except Exception as exc:
             # A corrupt packet mid-stream is normal over P2P; drop it and carry on.
             # A sustained run of them is what the heartbeat's video check catches.
             self._decode_errors += 1
+            if self._decode_errors == 1 or self._decode_errors % 100 == 0:
+                logger.warning(
+                    "video decode error %d for %s using %s: %s",
+                    self._decode_errors, self.serial, self._decoder_codec, exc,
+                )
 
     def _emit(self, av_frame) -> None:
         image = av_frame.to_ndarray(format="bgr24")
@@ -273,6 +352,14 @@ def _decode_buffer(buffer: object) -> bytes:
     if isinstance(buffer, (bytes, bytearray)):
         return bytes(buffer)
     return b""
+
+
+def _decoder_name(value: object) -> str:
+    """Translate the bridge's VideoCodec enum name to PyAV's decoder name."""
+    if value == 1:
+        return "hevc"
+    name = str(value or "H264").upper().replace(".", "")
+    return "hevc" if name in {"H265", "HEVC"} else "h264"
 
 
 def _put_newest(q: "queue.Queue[Frame]", frame: Frame) -> None:

@@ -28,6 +28,29 @@ COUNTER_ROOM = [[170, 432], [680, 432], [690, 500], [160, 500]]
 COUNTER_PAN = -65
 
 
+def test_room_scan_does_not_move_a_camera_without_video():
+    from surfaceguard.camera.panorama import StitchError
+    from surfaceguard.camera.sources.base import Capabilities
+
+    class ControlOnlyCamera:
+        capabilities = Capabilities(name="E30", has_ptz=True, pan_range=(-170, 170))
+
+        def __init__(self):
+            self.moves = []
+
+        def read(self, timeout=0):
+            return None
+
+        def move_to(self, pan, tilt=0, settle_s=0):
+            self.moves.append((pan, tilt))
+            return True
+
+    camera = ControlOnlyCamera()
+    with pytest.raises(StitchError, match="did not move"):
+        build_room_map(camera, settle_s=0)
+    assert camera.moves == []
+
+
 @pytest.fixture(scope="module")
 def room_fixture():
     cam = SyntheticCamera(fps=60)
